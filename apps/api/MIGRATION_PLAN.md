@@ -19,10 +19,10 @@ This document outlines a phased migration strategy from the current Django/Postg
 
 ### Migration Principles
 
-1. **Frontend Continuity**: API contracts remain stable; frontend changes are minimal
-2. **Incremental Rollout**: Services migrate independently behind a gateway
+1. **Frontend Continuity**: API contracts remain stable; frontend updates only `API_BASE_URL`
+2. **Direct Communication**: Frontend talks directly to Bun API (no reverse proxy needed)
 3. **Data Integrity**: Robust migration scripts with rollback capability
-4. **Zero Downtime**: Blue-green deployment with gradual traffic shifting
+4. **Zero Downtime**: Blue-green deployment with environment variable cutover
 
 ---
 
@@ -107,20 +107,67 @@ export const workspaceMembers = sqliteTable("workspace_members", {
 });
 ```
 
-### 0.4 API Gateway Setup
+### 0.4 Frontend Configuration
 
-Configure nginx/Caddy to route traffic:
+The frontend will communicate directly with the Bun API. Configure the API base URL in Vite config:
 
-```nginx
-# Initial: All traffic to Django
-location /api/ {
-    proxy_pass http://django-api:8000;
-}
+```typescript
+// vite.config.ts
+import { defineConfig } from "vite";
 
-# Later: Gradual migration
-location /api/v2/workspaces/ {
-    proxy_pass http://bun-api:3000;
-}
+export default defineConfig(({ mode }) => ({
+  define: {
+    __API_BASE_URL__: JSON.stringify(mode === "production" ? "https://api.yourplane.app" : "http://localhost:3000"),
+  },
+  // ... other config
+}));
+```
+
+```typescript
+// Frontend: lib/api-client.ts
+declare const __API_BASE_URL__: string;
+
+const API_BASE_URL = __API_BASE_URL__;
+
+export const api = {
+  fetch: async (path: string, options?: RequestInit) => {
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+      ...options,
+      credentials: "include", // Required for session cookies
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+      },
+    });
+    return response;
+  },
+};
+```
+
+### 0.5 CORS Configuration
+
+Since the frontend communicates directly, proper CORS setup is essential:
+
+```typescript
+// src/index.ts
+import { Hono } from "hono";
+import { cors } from "hono/cors";
+
+const app = new Hono();
+
+app.use(
+  "/*",
+  cors({
+    origin: [
+      process.env.FRONTEND_URL!, // Production frontend
+      "http://localhost:3001", // Local development
+    ],
+    credentials: true, // Allow cookies
+    allowHeaders: ["Content-Type", "Authorization", "X-API-Key"],
+    allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    maxAge: 86400, // Cache preflight for 24 hours
+  })
+);
 ```
 
 ### Deliverables
@@ -128,7 +175,7 @@ location /api/v2/workspaces/ {
 - [ ] Bun project initialized with TypeScript
 - [ ] Drizzle configured with SQLite (libSQL for production)
 - [ ] Base Hono app with health check endpoint
-- [ ] API gateway configured for traffic splitting
+- [ ] CORS configured for frontend origins
 - [ ] CI/CD pipeline for new service
 - [ ] Development environment parity
 
@@ -2696,6 +2743,7 @@ async function validateRelationships() {
 - [ ] Validate migration counts
 - [ ] Run integration tests against new API
 - [ ] Notify users of maintenance window
+- [ ] Ensure Bun API is deployed and healthy (but not receiving traffic)
 
 ### T-1 Hour
 
@@ -2706,8 +2754,8 @@ async function validateRelationships() {
 
 ### Cutover (T-0)
 
-- [ ] Update API gateway to route to Bun API
-- [ ] Start Bun API servers
+- [ ] Update `vite.config.ts`: set `__API_BASE_URL__` to Bun API URL
+- [ ] Build and deploy frontend with new API URL
 - [ ] Start Bun workers
 - [ ] Smoke test critical endpoints
 - [ ] Disable maintenance mode
@@ -2729,11 +2777,12 @@ async function validateRelationships() {
 ### Rollback Procedure
 
 1. Re-enable maintenance mode
-2. Route traffic back to Django
-3. Restart Django services
-4. Disable Bun services
-5. Sync any new data back to PostgreSQL
-6. Disable maintenance mode
+2. Update `vite.config.ts`: revert `__API_BASE_URL__` to Django API URL
+3. Build and redeploy frontend with Django API URL
+4. Restart Django services
+5. Stop Bun services
+6. Sync any new data back to PostgreSQL (if needed)
+7. Disable maintenance mode
 ```
 
 ### 10.5 Monitoring Setup
