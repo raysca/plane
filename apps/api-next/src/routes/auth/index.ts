@@ -4,6 +4,9 @@ import { z } from "zod";
 import { deleteCookie } from "hono/cookie";
 import { auth } from "../../lib/auth";
 import { csrfTokenMiddleware, getCsrfToken } from "../../middleware/csrf";
+import { eq } from "drizzle-orm";
+import { db } from "../../db";
+import { users } from "../../db/schema/user";
 
 const authRoutes = new Hono();
 
@@ -12,23 +15,23 @@ authRoutes.use("*", csrfTokenMiddleware);
 
 // Validation schemas
 const signInSchema = z.object({
-  email: z.string().email(),
+  email: z.email(),
   password: z.string().min(1),
 });
 
 const signUpSchema = z.object({
-  email: z.string().email(),
+  email: z.email(),
   password: z.string().min(8).max(128),
   first_name: z.string().optional(),
   last_name: z.string().optional(),
 });
 
 const magicLinkSchema = z.object({
-  email: z.string().email(),
+  email: z.email(),
 });
 
 const forgotPasswordSchema = z.object({
-  email: z.string().email(),
+  email: z.email(),
 });
 
 const setPasswordSchema = z.object({
@@ -36,6 +39,10 @@ const setPasswordSchema = z.object({
   confirm_password: z.string().min(8).max(128),
   token: z.string().optional(),
   uid: z.string().optional(),
+});
+
+const emailCheckSchema = z.object({
+  email: z.email(),
 });
 
 // Helper to format user response in DRF format
@@ -56,6 +63,31 @@ function formatUserResponse(user: Record<string, unknown>) {
     updated_at: user.updatedAt,
   };
 }
+
+// Email check
+authRoutes.post("/email-check/", zValidator("json", emailCheckSchema), async (c) => {
+  const { email } = c.req.valid("json");
+
+  // TODO: Fetch actual instance configuration from DB
+  const smtpConfigured = !!process.env.EMAIL_HOST;
+  const isMagicLoginEnabled = process.env.ENABLE_MAGIC_LINK_LOGIN === "1";
+
+  const user = await db.query.users.findFirst({
+    where: eq(users.email, email),
+  });
+
+  if (user) {
+    return c.json({
+      existing: true,
+      status: user.isPasswordAutoset && smtpConfigured && isMagicLoginEnabled ? "MAGIC_CODE" : "CREDENTIAL",
+    });
+  }
+
+  return c.json({
+    existing: false,
+    status: smtpConfigured && isMagicLoginEnabled ? "MAGIC_CODE" : "CREDENTIAL",
+  });
+});
 
 // CSRF token endpoint (frontend expects this)
 authRoutes.get("/get-csrf-token/", (c) => {

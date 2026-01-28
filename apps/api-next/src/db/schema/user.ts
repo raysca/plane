@@ -24,6 +24,7 @@ export const users = sqliteTable(
     isOnboarded: integer("is_onboarded", { mode: "boolean" }).default(false),
     isActive: integer("is_active", { mode: "boolean" }).default(true),
     isTourCompleted: integer("is_tour_completed", { mode: "boolean" }).default(false),
+    isPasswordAutoset: integer("is_password_autoset", { mode: "boolean" }).default(false),
     onboardingStep: integer("onboarding_step").default(0),
 
     // Timestamps
