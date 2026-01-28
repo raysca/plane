@@ -9,6 +9,7 @@ import { auth } from "./lib/auth";
 import { authRoutes } from "./routes/auth";
 import { userRoutes } from "./routes/users";
 import { workspaceRoutes } from "./routes/workspaces";
+import { projectRoutes } from "./routes/projects";
 import { instanceRoutes } from "./routes/instances";
 
 
@@ -105,6 +106,7 @@ app.route("/auth", authRoutes);
 app.route("/api/instances/", instanceRoutes);
 app.route("/api/users", userRoutes);
 app.route("/api/workspaces", workspaceRoutes);
+app.route("/api/workspaces/:slug/projects", projectRoutes);
 
 // 404 handler
 app.notFound((c) => {

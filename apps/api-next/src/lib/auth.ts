@@ -2,6 +2,7 @@ import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { magicLink, genericOAuth } from "better-auth/plugins";
 import { db } from "../db";
+import { users, sessions, accounts, verifications } from "../db/schema";
 
 /**
  * Better Auth Configuration
@@ -16,6 +17,12 @@ export const auth = betterAuth({
   // Database adapter
   database: drizzleAdapter(db, {
     provider: "sqlite",
+    schema: {
+      user: users,
+      session: sessions,
+      account: accounts,
+      verification: verifications
+    }
   }),
 
   // Base URL for auth endpoints
@@ -27,6 +34,18 @@ export const auth = betterAuth({
     requireEmailVerification: false, // Can be enabled later
     minPasswordLength: 8,
     maxPasswordLength: 128,
+    password: {
+      hash: async (password: string) => {
+        return await Bun.password.hash(password, {
+          algorithm: "argon2id",
+          memoryCost: 65536,
+          timeCost: 2,
+        });
+      },
+      verify: async ({ hash, password }: { hash: string; password: string }) => {
+        return await Bun.password.verify(password, hash);
+      },
+    },
     sendResetPassword: async ({ user, url }) => {
       // TODO: Implement email sending
       console.log(`[Auth] Password reset requested for ${user.email}: ${url}`);
@@ -152,36 +171,36 @@ export const auth = betterAuth({
     genericOAuth({
       config: process.env.GITEA_CLIENT_ID
         ? [
-            {
-              providerId: "gitea",
-              clientId: process.env.GITEA_CLIENT_ID,
-              clientSecret: process.env.GITEA_CLIENT_SECRET || "",
-              authorizationUrl: `${process.env.GITEA_ISSUER}/login/oauth/authorize`,
-              tokenUrl: `${process.env.GITEA_ISSUER}/login/oauth/access_token`,
-              scopes: ["read:user", "user:email"],
-              getUserInfo: async (tokens) => {
-                const response = await fetch(`${process.env.GITEA_ISSUER}/api/v1/user`, {
-                  headers: {
-                    Authorization: `Bearer ${tokens.accessToken}`,
-                  },
-                });
-                const profile = (await response.json()) as {
-                  id: number;
-                  login: string;
-                  full_name?: string;
-                  email?: string;
-                  avatar_url?: string;
-                };
-                return {
-                  id: String(profile.id),
-                  name: profile.full_name || profile.login,
-                  email: profile.email || "",
-                  image: profile.avatar_url,
-                  emailVerified: !!profile.email,
-                };
-              },
+          {
+            providerId: "gitea",
+            clientId: process.env.GITEA_CLIENT_ID,
+            clientSecret: process.env.GITEA_CLIENT_SECRET || "",
+            authorizationUrl: `${process.env.GITEA_ISSUER}/login/oauth/authorize`,
+            tokenUrl: `${process.env.GITEA_ISSUER}/login/oauth/access_token`,
+            scopes: ["read:user", "user:email"],
+            getUserInfo: async (tokens) => {
+              const response = await fetch(`${process.env.GITEA_ISSUER}/api/v1/user`, {
+                headers: {
+                  Authorization: `Bearer ${tokens.accessToken}`,
+                },
+              });
+              const profile = (await response.json()) as {
+                id: number;
+                login: string;
+                full_name?: string;
+                email?: string;
+                avatar_url?: string;
+              };
+              return {
+                id: String(profile.id),
+                name: profile.full_name || profile.login,
+                email: profile.email || "",
+                image: profile.avatar_url,
+                emailVerified: !!profile.email,
+              };
             },
-          ]
+          },
+        ]
         : [],
     }),
   ],

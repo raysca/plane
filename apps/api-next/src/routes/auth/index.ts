@@ -98,12 +98,34 @@ authRoutes.get("/get-csrf-token/", (c) => {
 });
 
 // Sign in with email/password
-authRoutes.post("/sign-in/", zValidator("json", signInSchema), async (c) => {
-  const { email, password } = c.req.valid("json");
+authRoutes.post("/sign-in/", async (c) => {
+  let email, password;
+  const contentType = c.req.header("content-type");
+  const isJson = contentType?.includes("application/json");
+
+  // Parse body based on content type
+  if (isJson) {
+    const body = await c.req.json();
+    email = body.email;
+    password = body.password;
+  } else {
+    const body = await c.req.parseBody();
+    email = body["email"];
+    password = body["password"];
+  }
+
+  // Validate input
+  const parseResult = signInSchema.safeParse({ email, password });
+  if (!parseResult.success) {
+    if (isJson) {
+      return c.json({ detail: "Invalid email or password." }, 400);
+    }
+    return c.redirect(`${process.env.FRONTEND_URL || "http://localhost:3000"}/?error_code=5070`); // REQUIRED_EMAIL_PASSWORD_SIGN_IN
+  }
 
   try {
     const result = await auth.api.signInEmail({
-      body: { email, password },
+      body: { email: email as string, password: password as string },
       asResponse: true,
     });
 
@@ -115,22 +137,39 @@ authRoutes.post("/sign-in/", zValidator("json", signInSchema), async (c) => {
 
     if (!result.ok) {
       const data = (await result.json()) as { message?: string };
-      return c.json(
-        { detail: data.message || "Invalid email or password." },
-        401
-      );
+      if (isJson) {
+        return c.json(
+          { detail: data.message || "Invalid email or password." },
+          401
+        );
+      }
+      // Map better-auth errors to Plane error codes if possible, or use generic
+      // 5065 = AUTHENTICATION_FAILED_SIGN_IN
+      // 5060 = USER_DOES_NOT_EXIST
+      // 5075 = INVALID_EMAIL_SIGN_IN
+      return c.redirect(`${process.env.FRONTEND_URL || "http://localhost:3000"}/?error_code=5065`);
     }
 
     const data = (await result.json()) as { user: Record<string, unknown>; token?: string };
 
-    // Return user data in DRF format
-    return c.json({
-      user: formatUserResponse(data.user),
-      access_token: data.token,
-    });
+    if (isJson) {
+      // Return user data in DRF format
+      return c.json({
+        user: formatUserResponse(data.user),
+        access_token: data.token,
+      });
+    }
+
+    // Form submission success redirect
+    const nextPath = c.req.query("next_path");
+    return c.redirect(`${process.env.FRONTEND_URL || "http://localhost:3000"}${nextPath || "/"}`);
+
   } catch (error) {
     console.error("[Auth] Sign in error:", error);
-    return c.json({ detail: "Invalid email or password." }, 401);
+    if (isJson) {
+      return c.json({ detail: "Invalid email or password." }, 401);
+    }
+    return c.redirect(`${process.env.FRONTEND_URL || "http://localhost:3000"}/?error_code=5065`);
   }
 });
 
