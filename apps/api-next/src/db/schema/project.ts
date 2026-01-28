@@ -1,0 +1,265 @@
+import { sqliteTable, text, integer, real, index, unique } from "drizzle-orm/sqlite-core";
+import { relations } from "drizzle-orm";
+import { createId } from "@paralleldrive/cuid2";
+import { users } from "./user";
+import { workspaces } from "./workspace";
+
+// Projects
+export const projects = sqliteTable(
+  "projects",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    descriptionText: text("description_text"),
+    descriptionHtml: text("description_html"),
+    network: integer("network").default(2), // 0=Secret, 2=Public
+    identifier: text("identifier").notNull(),
+    emoji: text("emoji"),
+    iconProp: text("icon_prop", { mode: "json" }),
+    coverImage: text("cover_image"),
+    archiveIn: integer("archive_in").default(0),
+    closeIn: integer("close_in").default(0),
+    defaultAssigneeId: text("default_assignee_id").references(() => users.id),
+    defaultStateId: text("default_state_id"),
+    projectLeadId: text("project_lead_id").references(() => users.id),
+    estimateId: text("estimate_id"),
+    sortOrder: real("sort_order").default(65535),
+    createdById: text("created_by_id").references(() => users.id),
+    createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+    deletedAt: integer("deleted_at", { mode: "timestamp" }),
+  },
+  (table) => [
+    index("project_workspace_idx").on(table.workspaceId),
+    unique("project_identifier_unique").on(table.workspaceId, table.identifier),
+  ]
+);
+
+// Project members
+export const projectMembers = sqliteTable(
+  "project_members",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    memberId: text("member_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    role: integer("role").notNull().default(15), // 5=Guest, 10=Viewer, 15=Member, 20=Admin
+    isActive: integer("is_active", { mode: "boolean" }).default(true),
+    viewProps: text("view_props", { mode: "json" }),
+    defaultProps: text("default_props", { mode: "json" }),
+    preferences: text("preferences", { mode: "json" }),
+    sortOrder: real("sort_order").default(65535),
+    createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+  },
+  (table) => [
+    unique("project_member_unique").on(table.projectId, table.memberId),
+    index("project_member_project_idx").on(table.projectId),
+    index("project_member_member_idx").on(table.memberId),
+  ]
+);
+
+// Project states
+export const states = sqliteTable(
+  "states",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    color: text("color").notNull(),
+    group: text("group").notNull(), // 'backlog', 'unstarted', 'started', 'completed', 'cancelled'
+    description: text("description"),
+    sequence: real("sequence").default(65535),
+    isDefault: integer("is_default", { mode: "boolean" }).default(false),
+    createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+  },
+  (table) => [
+    index("state_project_idx").on(table.projectId),
+    index("state_workspace_idx").on(table.workspaceId),
+  ]
+);
+
+// Project labels
+export const labels = sqliteTable(
+  "labels",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    parentId: text("parent_id"),
+    name: text("name").notNull(),
+    color: text("color").notNull().default("#000000"),
+    description: text("description"),
+    sortOrder: real("sort_order").default(65535),
+    createdById: text("created_by_id").references(() => users.id),
+    createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+  },
+  (table) => [
+    index("label_project_idx").on(table.projectId),
+    index("label_workspace_idx").on(table.workspaceId),
+  ]
+);
+
+// Estimates
+export const estimates = sqliteTable(
+  "estimates",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    type: text("type").default("categories"), // 'categories', 'points', 'time'
+    lastUsedAt: integer("last_used_at", { mode: "timestamp" }),
+    createdById: text("created_by_id").references(() => users.id),
+    createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+  },
+  (table) => [
+    index("estimate_project_idx").on(table.projectId),
+  ]
+);
+
+// Estimate points
+export const estimatePoints = sqliteTable(
+  "estimate_points",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    estimateId: text("estimate_id")
+      .notNull()
+      .references(() => estimates.id, { onDelete: "cascade" }),
+    key: integer("key").notNull(),
+    value: text("value").notNull(),
+    description: text("description"),
+    createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+  },
+  (table) => [
+    index("estimate_point_estimate_idx").on(table.estimateId),
+  ]
+);
+
+// Relations
+export const projectsRelations = relations(projects, ({ one, many }) => ({
+  workspace: one(workspaces, {
+    fields: [projects.workspaceId],
+    references: [workspaces.id],
+  }),
+  defaultAssignee: one(users, {
+    fields: [projects.defaultAssigneeId],
+    references: [users.id],
+    relationName: "defaultAssignee",
+  }),
+  projectLead: one(users, {
+    fields: [projects.projectLeadId],
+    references: [users.id],
+    relationName: "projectLead",
+  }),
+  createdBy: one(users, {
+    fields: [projects.createdById],
+    references: [users.id],
+    relationName: "createdBy",
+  }),
+  members: many(projectMembers),
+  states: many(states),
+  labels: many(labels),
+  estimates: many(estimates),
+}));
+
+export const projectMembersRelations = relations(projectMembers, ({ one }) => ({
+  project: one(projects, {
+    fields: [projectMembers.projectId],
+    references: [projects.id],
+  }),
+  member: one(users, {
+    fields: [projectMembers.memberId],
+    references: [users.id],
+  }),
+}));
+
+export const statesRelations = relations(states, ({ one }) => ({
+  project: one(projects, {
+    fields: [states.projectId],
+    references: [projects.id],
+  }),
+  workspace: one(workspaces, {
+    fields: [states.workspaceId],
+    references: [workspaces.id],
+  }),
+}));
+
+export const labelsRelations = relations(labels, ({ one }) => ({
+  project: one(projects, {
+    fields: [labels.projectId],
+    references: [projects.id],
+  }),
+  workspace: one(workspaces, {
+    fields: [labels.workspaceId],
+    references: [workspaces.id],
+  }),
+  createdBy: one(users, {
+    fields: [labels.createdById],
+    references: [users.id],
+  }),
+  parent: one(labels, {
+    fields: [labels.parentId],
+    references: [labels.id],
+  }),
+}));
+
+export const estimatesRelations = relations(estimates, ({ one, many }) => ({
+  project: one(projects, {
+    fields: [estimates.projectId],
+    references: [projects.id],
+  }),
+  workspace: one(workspaces, {
+    fields: [estimates.workspaceId],
+    references: [workspaces.id],
+  }),
+  createdBy: one(users, {
+    fields: [estimates.createdById],
+    references: [users.id],
+  }),
+  points: many(estimatePoints),
+}));
+
+export const estimatePointsRelations = relations(estimatePoints, ({ one }) => ({
+  estimate: one(estimates, {
+    fields: [estimatePoints.estimateId],
+    references: [estimates.id],
+  }),
+}));
