@@ -1,6 +1,6 @@
-import type { ServerWebSocket } from "bun";
+import type { ServerWebSocket, Server } from "bun";
 import { app } from "./app";
-import type { Server } from "http";
+import admin from './admin/index.html'
 
 // WebSocket data interface
 interface WebSocketData {
@@ -165,11 +165,9 @@ const port = parseInt(process.env.PORT || "8000");
 
 const server = Bun.serve({
   port,
-  fetch(req: Request, server: Server) {
-    // Handle WebSocket upgrade
-    const url = new URL(req.url);
-    console.log(url.pathname);
-    if (url.pathname === "/ws" || url.pathname === "/realtime") {
+  routes: {
+    '/admin': admin,
+    '/ws/*': (req: Request, server: Server<WebSocketData>) => {
       const upgraded = server.upgrade(req, {
         data: {
           userId: null,
@@ -181,10 +179,21 @@ const server = Bun.serve({
         return undefined;
       }
       return new Response("WebSocket upgrade failed", { status: 400 });
-    }
-
-    // Handle HTTP requests with Hono
-    return app.fetch(req);
+    },
+    '/realtime/*': (req: Request, server: Server<WebSocketData>) => {
+      const upgraded = server.upgrade(req, {
+        data: {
+          userId: null,
+          subscriptions: new Set(),
+          connectedAt: Date.now(),
+        },
+      });
+      if (upgraded) {
+        return undefined;
+      }
+      return new Response("WebSocket upgrade failed", { status: 400 });
+    },
+    '/*': (req: Request, server: Server<WebSocketData>) => app.fetch(req, server),
   },
   websocket: websocketHandler,
 });
