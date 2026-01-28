@@ -5,9 +5,12 @@ import { prettyJSON } from "hono/pretty-json";
 import { secureHeaders } from "hono/secure-headers";
 import { timing } from "hono/timing";
 import { errorHandler } from "./middleware/error";
+import { auth } from "./lib/auth";
 import { authRoutes } from "./routes/auth";
 import { userRoutes } from "./routes/users";
 import { workspaceRoutes } from "./routes/workspaces";
+import { instanceRoutes } from "./routes/instances";
+
 
 // Types for context variables
 export type Variables = {
@@ -53,6 +56,7 @@ export type Variables = {
     memberId: string;
     role: number;
   } | null;
+  csrfToken: string;
 };
 
 // Create Hono app
@@ -69,8 +73,8 @@ app.use(
   "*",
   cors({
     origin: [
-      process.env.FRONTEND_URL || "http://localhost:3001",
-      "http://localhost:3001",
+      process.env.FRONTEND_URL || "http://localhost:3000",
+      "http://localhost:3000",
       "http://localhost:4000",
     ],
     credentials: true,
@@ -92,8 +96,12 @@ app.get("/api/health/", (c) => {
   });
 });
 
+// Mount Better Auth handler for internal routes (OAuth callbacks, etc.)
+app.on(["POST", "GET"], "/api/auth/*", (c) => auth.handler(c.req.raw));
+
 // Mount routes
 app.route("/auth", authRoutes);
+app.route("/api/instances/", instanceRoutes);
 app.route("/api/users", userRoutes);
 app.route("/api/workspaces", workspaceRoutes);
 

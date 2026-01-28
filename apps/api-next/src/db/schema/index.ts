@@ -36,3 +36,4 @@ export * from "./asset";
 
 // Integrations
 export * from "./integration";
+export * from "./instance";

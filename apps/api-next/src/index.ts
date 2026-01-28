@@ -1,5 +1,6 @@
 import type { ServerWebSocket } from "bun";
 import { app } from "./app";
+import type { Server } from "http";
 
 // WebSocket data interface
 interface WebSocketData {
@@ -164,9 +165,10 @@ const port = parseInt(process.env.PORT || "8000");
 
 const server = Bun.serve({
   port,
-  fetch(req, server) {
+  fetch(req: Request, server: Server) {
     // Handle WebSocket upgrade
     const url = new URL(req.url);
+    console.log(url.pathname);
     if (url.pathname === "/ws" || url.pathname === "/realtime") {
       const upgraded = server.upgrade(req, {
         data: {

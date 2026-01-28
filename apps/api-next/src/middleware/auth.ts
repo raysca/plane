@@ -1,6 +1,6 @@
 import { createMiddleware } from "hono/factory";
 import type { Variables } from "../app";
-// import { auth } from "../lib/auth";
+import { auth } from "../lib/auth";
 
 // Role constants (match Django)
 export const ROLES = {
@@ -17,24 +17,42 @@ export type Role = (typeof ROLES)[keyof typeof ROLES];
  * Requires valid session, returns 401 if not authenticated
  */
 export const authMiddleware = createMiddleware<{ Variables: Variables }>(async (c, next) => {
-  // TODO: Implement with Better Auth once configured
-  // const session = await auth.api.getSession({ headers: c.req.raw.headers });
-  //
-  // if (!session) {
-  //   return c.json({ detail: "Authentication credentials were not provided." }, 401);
-  // }
-  //
-  // if (!session.user.isActive) {
-  //   return c.json({ detail: "User account is disabled." }, 403);
-  // }
-  //
-  // c.set("user", session.user);
-  // c.set("session", session.session);
+  try {
+    const session = await auth.api.getSession({ headers: c.req.raw.headers });
 
-  // Temporary: Return 401 until Better Auth is configured
-  return c.json({ detail: "Authentication not yet configured." }, 401);
+    if (!session) {
+      return c.json({ detail: "Authentication credentials were not provided." }, 401);
+    }
 
-  // await next();
+    if (!session.user.isActive) {
+      return c.json({ detail: "User account is disabled." }, 403);
+    }
+
+    // Set user in context with proper types
+    c.set("user", {
+      id: session.user.id,
+      email: session.user.email,
+      name: session.user.name,
+      username: session.user.username || null,
+      displayName: session.user.displayName || null,
+      avatar: session.user.avatar || null,
+      isOnboarded: session.user.isOnboarded || false,
+      isActive: session.user.isActive ?? true,
+      createdAt: session.user.createdAt ? new Date(session.user.createdAt) : new Date(),
+      updatedAt: session.user.updatedAt ? new Date(session.user.updatedAt) : new Date(),
+    });
+
+    c.set("session", {
+      id: session.session.id,
+      userId: session.session.userId,
+      expiresAt: new Date(session.session.expiresAt),
+    });
+
+    await next();
+  } catch (error) {
+    console.error("[Auth] Session error:", error);
+    return c.json({ detail: "Authentication credentials were not provided." }, 401);
+  }
 });
 
 /**
@@ -43,13 +61,32 @@ export const authMiddleware = createMiddleware<{ Variables: Variables }>(async (
  */
 export const optionalAuthMiddleware = createMiddleware<{ Variables: Variables }>(
   async (c, next) => {
-    // TODO: Implement with Better Auth once configured
-    // const session = await auth.api.getSession({ headers: c.req.raw.headers });
-    //
-    // if (session?.user && session.user.isActive) {
-    //   c.set("user", session.user);
-    //   c.set("session", session.session);
-    // }
+    try {
+      const session = await auth.api.getSession({ headers: c.req.raw.headers });
+
+      if (session?.user && session.user.isActive) {
+        c.set("user", {
+          id: session.user.id,
+          email: session.user.email,
+          name: session.user.name,
+          username: session.user.username || null,
+          displayName: session.user.displayName || null,
+          avatar: session.user.avatar || null,
+          isOnboarded: session.user.isOnboarded || false,
+          isActive: session.user.isActive ?? true,
+          createdAt: session.user.createdAt ? new Date(session.user.createdAt) : new Date(),
+          updatedAt: session.user.updatedAt ? new Date(session.user.updatedAt) : new Date(),
+        });
+
+        c.set("session", {
+          id: session.session.id,
+          userId: session.session.userId,
+          expiresAt: new Date(session.session.expiresAt),
+        });
+      }
+    } catch {
+      // Silently ignore auth errors for optional auth
+    }
 
     await next();
   }
@@ -67,7 +104,7 @@ export const apiTokenMiddleware = createMiddleware<{ Variables: Variables }>(asy
     return await next();
   }
 
-  // TODO: Implement API token validation
+  // TODO: Implement API token validation when API tokens schema is ready
   // const tokenHash = await hashToken(apiKey);
   // const token = await db.query.apiTokens.findFirst({
   //   where: eq(apiTokens.tokenHash, tokenHash),
@@ -87,7 +124,6 @@ export const apiTokenMiddleware = createMiddleware<{ Variables: Variables }>(asy
   // // Fetch user
   // const user = await db.query.users.findFirst({ where: eq(users.id, token.userId) });
   // c.set("user", user);
-  // c.set("authMethod", "api_token");
 
   return c.json({ detail: "API token authentication not yet implemented." }, 501);
 });
