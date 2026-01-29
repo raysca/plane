@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { eq, desc, and, inArray, sql } from "drizzle-orm";
+import { eq, desc, and, inArray, sql, asc } from "drizzle-orm";
 import { db } from "../../db";
 import {
   users,
@@ -405,6 +405,7 @@ userRoutes.get("/me/settings/", async (c) => {
         eq(workspaceMembers.userId, contextUser.id),
         eq(workspaceMembers.isActive, true)
       ))
+      .orderBy(asc(workspaces.createdAt))
       .limit(1);
 
     if (firstMembership.length > 0) {

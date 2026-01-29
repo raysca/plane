@@ -27,6 +27,7 @@ export const notifications = sqliteTable(
     message: text("message"),
     messageHtml: text("message_html"),
     messageStripped: text("message_stripped"),
+    sender: text("sender").notNull().default(""),
     data: text("data", { mode: "json" }),
     readAt: integer("read_at", { mode: "timestamp" }),
     archivedAt: integer("archived_at", { mode: "timestamp" }),

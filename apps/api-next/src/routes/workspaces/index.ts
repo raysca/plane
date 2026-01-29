@@ -21,7 +21,9 @@ import type { Variables } from "../../app";
 import { generateSlug, isValidSlug } from "../../lib/utils";
 import { seedWorkspace } from "../../lib/workspace-seeder";
 import { userProfiles } from "../../db/schema/user";
-import { sql } from "drizzle-orm";
+import { notifications } from "../../db/schema/notification";
+import { sql, not, like, isNull } from "drizzle-orm";
+import homePreferenceRoutes from "./home-preference";
 
 const workspaceRoutes = new Hono<{ Variables: Variables }>();
 
@@ -1043,6 +1045,9 @@ workspaceRoutes.patch("/:slug/sidebar-preferences/", async (c) => {
   });
 });
 
+// Home Preferences
+workspaceRoutes.route("/:slug/home-preferences/", homePreferenceRoutes);
+
 // =====================================================
 // Placeholder routes (later phases)
 // =====================================================
@@ -1123,9 +1128,57 @@ workspaceRoutes.get("/:slug/entity-search/", async (c) => {
   return c.json({ detail: "Not implemented" }, 501);
 });
 
-// Notifications
+// Notifications (placeholder for full list)
 workspaceRoutes.get("/:slug/users/notifications/", async (c) => {
   return c.json({ detail: "Not implemented" }, 501);
+});
+
+// GET /api/workspaces/:slug/users/notifications/unread/ - Get unread notification counts
+workspaceRoutes.get("/:slug/users/notifications/unread/", async (c) => {
+  const user = c.get("user");
+  if (!user) {
+    return c.json({ detail: "Authentication required." }, 401);
+  }
+
+  const workspace = c.get("workspace");
+  if (!workspace) {
+    return c.json({ detail: "Workspace not found." }, 404);
+  }
+
+  // Count unread notifications excluding mentions
+  const unreadResult = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(notifications)
+    .where(
+      and(
+        eq(notifications.workspaceId, workspace.id),
+        eq(notifications.receiverId, user.id),
+        isNull(notifications.readAt),
+        isNull(notifications.archivedAt),
+        isNull(notifications.snoozedTill),
+        not(like(notifications.sender, "%mentioned%"))
+      )
+    );
+
+  // Count unread mention notifications
+  const mentionResult = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(notifications)
+    .where(
+      and(
+        eq(notifications.workspaceId, workspace.id),
+        eq(notifications.receiverId, user.id),
+        isNull(notifications.readAt),
+        isNull(notifications.archivedAt),
+        isNull(notifications.snoozedTill),
+        like(notifications.sender, "%mentioned%")
+      )
+    );
+
+  return c.json({
+    total_unread_notifications_count: Number(unreadResult[0]?.count ?? 0),
+    mention_unread_notifications_count: Number(mentionResult[0]?.count ?? 0),
+  });
 });
 
 // Favorites

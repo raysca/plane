@@ -202,6 +202,32 @@ export const stickies = sqliteTable(
   ]
 );
 
+// Home Preferences
+export const workspaceHomePreferences = sqliteTable(
+  "workspace_home_preferences",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    key: text("key").notNull(),
+    isEnabled: integer("is_enabled", { mode: "boolean" }).default(true),
+    config: text("config", { mode: "json" }).$defaultFn(() => ({})),
+    sortOrder: real("sort_order").default(65535),
+    createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+  },
+  (table) => [
+    unique("workspace_home_pref_unique").on(table.workspaceId, table.userId, table.key),
+    index("workspace_home_pref_user_workspace_idx").on(table.userId, table.workspaceId),
+  ]
+);
+
 // Relations
 export const workspacesRelations = relations(workspaces, ({ one, many }) => ({
   owner: one(users, {
@@ -214,6 +240,7 @@ export const workspacesRelations = relations(workspaces, ({ one, many }) => ({
   favorites: many(favorites),
   quickLinks: many(quickLinks),
   stickies: many(stickies),
+  homePreferences: many(workspaceHomePreferences),
 }));
 
 export const workspaceMembersRelations = relations(workspaceMembers, ({ one }) => ({
@@ -278,6 +305,17 @@ export const stickiesRelations = relations(stickies, ({ one }) => ({
   }),
   user: one(users, {
     fields: [stickies.userId],
+    references: [users.id],
+  }),
+}));
+
+export const workspaceHomePreferencesRelations = relations(workspaceHomePreferences, ({ one }) => ({
+  workspace: one(workspaces, {
+    fields: [workspaceHomePreferences.workspaceId],
+    references: [workspaces.id],
+  }),
+  user: one(users, {
+    fields: [workspaceHomePreferences.userId],
     references: [users.id],
   }),
 }));

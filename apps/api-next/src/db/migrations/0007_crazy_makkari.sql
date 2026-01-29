@@ -1,0 +1,1 @@
+ALTER TABLE `notifications` ADD `sender` text DEFAULT '' NOT NULL;
