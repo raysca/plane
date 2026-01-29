@@ -4,9 +4,10 @@ import { z } from "zod";
 import { deleteCookie } from "hono/cookie";
 import { auth } from "../../lib/auth";
 import { csrfTokenMiddleware, getCsrfToken } from "../../middleware/csrf";
-import { eq } from "drizzle-orm";
+import { eq, and, asc } from "drizzle-orm";
 import { db } from "../../db";
-import { users } from "../../db/schema/user";
+import { users, userProfiles } from "../../db/schema/user";
+import { workspaces, workspaceMembers, workspaceInvitations } from "../../db/schema/workspace";
 
 const authRoutes = new Hono();
 
@@ -62,6 +63,131 @@ function formatUserResponse(user: Record<string, unknown>) {
     created_at: user.createdAt,
     updated_at: user.updatedAt,
   };
+}
+
+// Authentication error codes (matching Django's AUTHENTICATION_ERROR_CODES)
+const AUTH_ERROR_CODES = {
+  INSTANCE_NOT_CONFIGURED: 5000,
+  SIGNUP_DISABLED: 5015,
+  INVALID_PASSWORD: 5020,
+  USER_ALREADY_EXIST: 5030,
+  AUTHENTICATION_FAILED_SIGN_UP: 5035,
+  REQUIRED_EMAIL_PASSWORD_SIGN_UP: 5040,
+  INVALID_EMAIL_SIGN_UP: 5045,
+  INVALID_EMAIL_MAGIC_SIGN_UP: 5050,
+  MAGIC_SIGN_UP_EMAIL_CODE_REQUIRED: 5055,
+  USER_DOES_NOT_EXIST: 5060,
+  AUTHENTICATION_FAILED_SIGN_IN: 5065,
+  REQUIRED_EMAIL_PASSWORD_SIGN_IN: 5070,
+  INVALID_EMAIL_SIGN_IN: 5075,
+} as const;
+
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
+
+/**
+ * Build a safe redirect URL with optional error query params
+ * Matches Django's get_safe_redirect_url behavior
+ */
+function buildRedirectUrl(nextPath?: string | null, params?: Record<string, string | number>): string {
+  const base = FRONTEND_URL;
+  const path = nextPath || "/";
+  const url = new URL(path, base);
+
+  if (params) {
+    for (const [key, value] of Object.entries(params)) {
+      url.searchParams.set(key, String(value));
+    }
+  }
+
+  return url.toString();
+}
+
+/**
+ * Get redirection path after login/signup
+ * Matches Django's get_redirection_path logic
+ */
+async function getRedirectionPath(userId: string, email: string): Promise<string> {
+  // Check if user is onboarded
+  const user = await db.query.users.findFirst({
+    where: eq(users.id, userId),
+  });
+
+  if (!user?.isOnboarded) {
+    return "/onboarding";
+  }
+
+  // Check for active workspace memberships
+  const memberships = await db
+    .select({ workspace: workspaces })
+    .from(workspaceMembers)
+    .innerJoin(workspaces, eq(workspaceMembers.workspaceId, workspaces.id))
+    .where(and(
+      eq(workspaceMembers.userId, userId),
+      eq(workspaceMembers.isActive, true)
+    ))
+    .orderBy(asc(workspaces.createdAt));
+
+  if (memberships.length > 0) {
+    return `/${memberships[0]!.workspace.slug}`;
+  }
+
+  // Check for pending invitations
+  const pendingInvitations = await db.query.workspaceInvitations.findFirst({
+    where: eq(workspaceInvitations.email, email),
+  });
+
+  if (pendingInvitations) {
+    return "/invitations";
+  }
+
+  return "/create-workspace";
+}
+
+/**
+ * Process accepted workspace invitations after signup/login
+ * Matches Django's process_workspace_project_invitations
+ */
+async function processWorkspaceInvitations(userId: string, email: string): Promise<void> {
+  // Find accepted workspace invitations for this email
+  const acceptedInvites = await db.query.workspaceInvitations.findMany({
+    where: and(
+      eq(workspaceInvitations.email, email),
+      eq(workspaceInvitations.accepted, true)
+    ),
+  });
+
+  for (const invite of acceptedInvites) {
+    // Check if already a member
+    const existingMember = await db.query.workspaceMembers.findFirst({
+      where: and(
+        eq(workspaceMembers.workspaceId, invite.workspaceId),
+        eq(workspaceMembers.userId, userId)
+      ),
+    });
+
+    if (!existingMember) {
+      await db.insert(workspaceMembers).values({
+        workspaceId: invite.workspaceId,
+        userId: userId,
+        role: invite.role,
+      });
+    }
+  }
+
+  // Delete processed invitations
+  if (acceptedInvites.length > 0) {
+    for (const invite of acceptedInvites) {
+      await db.delete(workspaceInvitations).where(eq(workspaceInvitations.id, invite.id));
+    }
+  }
+}
+
+/**
+ * Validate email format
+ */
+function isValidEmail(email: string): boolean {
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return emailRegex.test(email);
 }
 
 // Email check
@@ -120,7 +246,7 @@ authRoutes.post("/sign-in/", async (c) => {
     if (isJson) {
       return c.json({ detail: "Invalid email or password." }, 400);
     }
-    return c.redirect(`${process.env.FRONTEND_URL || "http://localhost:3000"}/?error_code=5070`); // REQUIRED_EMAIL_PASSWORD_SIGN_IN
+    return c.redirect(buildRedirectUrl(null, { error_code: AUTH_ERROR_CODES.REQUIRED_EMAIL_PASSWORD_SIGN_IN }));
   }
 
   try {
@@ -147,10 +273,15 @@ authRoutes.post("/sign-in/", async (c) => {
       // 5065 = AUTHENTICATION_FAILED_SIGN_IN
       // 5060 = USER_DOES_NOT_EXIST
       // 5075 = INVALID_EMAIL_SIGN_IN
-      return c.redirect(`${process.env.FRONTEND_URL || "http://localhost:3000"}/?error_code=5065`);
+      return c.redirect(buildRedirectUrl(null, { error_code: AUTH_ERROR_CODES.AUTHENTICATION_FAILED_SIGN_IN }));
     }
 
     const data = (await result.json()) as { user: Record<string, unknown>; token?: string };
+    const userId = data.user.id as string;
+    const userEmail = data.user.email as string;
+
+    // Post-login workflow: process accepted workspace invitations
+    await processWorkspaceInvitations(userId, userEmail);
 
     if (isJson) {
       // Return user data in DRF format
@@ -162,28 +293,106 @@ authRoutes.post("/sign-in/", async (c) => {
 
     // Form submission success redirect
     const nextPath = c.req.query("next_path");
-    return c.redirect(`${process.env.FRONTEND_URL || "http://localhost:3000"}${nextPath || "/"}`);
+    const path = nextPath || await getRedirectionPath(userId, userEmail);
+    return c.redirect(buildRedirectUrl(path));
 
   } catch (error) {
     console.error("[Auth] Sign in error:", error);
     if (isJson) {
       return c.json({ detail: "Invalid email or password." }, 401);
     }
-    return c.redirect(`${process.env.FRONTEND_URL || "http://localhost:3000"}/?error_code=5065`);
+    return c.redirect(buildRedirectUrl(null, { error_code: AUTH_ERROR_CODES.AUTHENTICATION_FAILED_SIGN_IN }));
   }
 });
 
-// Sign up
-authRoutes.post("/sign-up/", zValidator("json", signUpSchema), async (c) => {
-  const { email, password, first_name, last_name } = c.req.valid("json");
+// Sign up - supports both JSON and form POST (matching Django's SignUpAuthEndpoint)
+authRoutes.post("/sign-up/", async (c) => {
+  let email: string | undefined;
+  let password: string | undefined;
+  let firstName: string | undefined;
+  let lastName: string | undefined;
+  let nextPath: string | undefined;
+
+  const contentType = c.req.header("content-type");
+  const isJson = contentType?.includes("application/json");
+
+  // Parse body based on content type
+  if (isJson) {
+    const body = await c.req.json();
+    email = body.email;
+    password = body.password;
+    firstName = body.first_name;
+    lastName = body.last_name;
+  } else {
+    const body = await c.req.parseBody();
+    email = body["email"] as string | undefined;
+    password = body["password"] as string | undefined;
+    firstName = body["first_name"] as string | undefined;
+    lastName = body["last_name"] as string | undefined;
+    nextPath = body["next_path"] as string | undefined;
+  }
+
+  // Validate required fields
+  if (!email || !password) {
+    if (isJson) {
+      return c.json({ detail: "Email and password are required." }, 400);
+    }
+    return c.redirect(buildRedirectUrl(nextPath, {
+      error_code: AUTH_ERROR_CODES.REQUIRED_EMAIL_PASSWORD_SIGN_UP,
+      error_message: "REQUIRED_EMAIL_PASSWORD_SIGN_UP",
+    }));
+  }
+
+  // Normalize email
+  email = email.trim().toLowerCase();
+
+  // Validate email format
+  if (!isValidEmail(email)) {
+    if (isJson) {
+      return c.json({ detail: "Invalid email address." }, 400);
+    }
+    return c.redirect(buildRedirectUrl(nextPath, {
+      error_code: AUTH_ERROR_CODES.INVALID_EMAIL_SIGN_UP,
+      error_message: "INVALID_EMAIL_SIGN_UP",
+    }));
+  }
+
+  // Validate password (min 8 chars)
+  const parseResult = signUpSchema.safeParse({ email, password });
+  if (!parseResult.success) {
+    if (isJson) {
+      return c.json({ detail: "Password must be between 8 and 128 characters." }, 400);
+    }
+    return c.redirect(buildRedirectUrl(nextPath, {
+      error_code: AUTH_ERROR_CODES.INVALID_PASSWORD,
+      error_message: "INVALID_PASSWORD",
+    }));
+  }
+
+  // Check if user already exists (matching Django's explicit check before provider call)
+  const existingUser = await db.query.users.findFirst({
+    where: eq(users.email, email),
+  });
+
+  if (existingUser) {
+    if (isJson) {
+      return c.json({ email: ["A user with this email already exists."] }, 400);
+    }
+    return c.redirect(buildRedirectUrl(nextPath, {
+      error_code: AUTH_ERROR_CODES.USER_ALREADY_EXIST,
+      error_message: "USER_ALREADY_EXIST",
+    }));
+  }
 
   try {
-    const name = [first_name, last_name].filter(Boolean).join(" ");
+    const name = [firstName, lastName].filter(Boolean).join(" ");
     const result = await auth.api.signUpEmail({
       body: {
         email,
         password,
         name: name || "User",
+        firstName: firstName || "",
+        lastName: lastName || "",
       },
       asResponse: true,
     });
@@ -196,22 +405,45 @@ authRoutes.post("/sign-up/", zValidator("json", signUpSchema), async (c) => {
 
     if (!result.ok) {
       const data = (await result.json()) as { message?: string };
-      // Handle specific errors
-      if (data.message?.includes("already exists")) {
-        return c.json({ email: ["A user with this email already exists."] }, 400);
+      if (isJson) {
+        if (data.message?.includes("already exists")) {
+          return c.json({ email: ["A user with this email already exists."] }, 400);
+        }
+        return c.json({ detail: data.message || "Failed to create account." }, 400);
       }
-      return c.json({ detail: data.message || "Failed to create account." }, 400);
+      return c.redirect(buildRedirectUrl(nextPath, {
+        error_code: AUTH_ERROR_CODES.AUTHENTICATION_FAILED_SIGN_UP,
+        error_message: "AUTHENTICATION_FAILED_SIGN_UP",
+      }));
     }
 
     const data = (await result.json()) as { user: Record<string, unknown>; token?: string };
+    const userId = data.user.id as string;
+    const userEmail = data.user.email as string;
 
-    return c.json({
-      user: formatUserResponse(data.user),
-      access_token: data.token,
-    });
+    // Post-signup workflow: process accepted workspace invitations
+    await processWorkspaceInvitations(userId, userEmail);
+
+    if (isJson) {
+      return c.json({
+        user: formatUserResponse(data.user),
+        access_token: data.token,
+      });
+    }
+
+    // Form submission: redirect to appropriate path
+    const path = nextPath || await getRedirectionPath(userId, userEmail);
+    return c.redirect(buildRedirectUrl(path));
+
   } catch (error) {
     console.error("[Auth] Sign up error:", error);
-    return c.json({ detail: "Failed to create account." }, 400);
+    if (isJson) {
+      return c.json({ detail: "Failed to create account." }, 400);
+    }
+    return c.redirect(buildRedirectUrl(nextPath, {
+      error_code: AUTH_ERROR_CODES.AUTHENTICATION_FAILED_SIGN_UP,
+      error_message: "AUTHENTICATION_FAILED_SIGN_UP",
+    }));
   }
 });
 
@@ -264,15 +496,51 @@ authRoutes.post("/magic-generate/", zValidator("json", magicLinkSchema), async (
 });
 
 // Magic link - verify and sign in
+// Supports both JSON and form POST (matching Django's MagicSignInEndpoint)
 authRoutes.post("/magic-sign-in/", async (c) => {
-  const body = (await c.req.json()) as { token?: string; key?: string };
-  const { token, key } = body;
+  let code: string | undefined;
+  let email: string | undefined;
+  let nextPath: string | undefined;
+
+  const contentType = c.req.header("content-type");
+  const isJson = contentType?.includes("application/json");
+
+  if (isJson) {
+    const body = await c.req.json();
+    code = body.token || body.key || body.code;
+    email = body.email;
+    nextPath = body.next_path;
+  } else {
+    const body = await c.req.parseBody();
+    code = (body["code"] as string)?.trim();
+    email = (body["email"] as string)?.trim().toLowerCase();
+    nextPath = body["next_path"] as string | undefined;
+  }
 
   // Support both token (from URL) and key (from code entry)
-  const magicToken = token || key;
+  const magicToken = code;
 
   if (!magicToken) {
-    return c.json({ detail: "Token is required." }, 400);
+    if (isJson) {
+      return c.json({ detail: "Token is required." }, 400);
+    }
+    return c.redirect(buildRedirectUrl(nextPath, {
+      error_code: 5085, // MAGIC_SIGN_IN_EMAIL_CODE_REQUIRED
+      error_message: "MAGIC_SIGN_IN_EMAIL_CODE_REQUIRED",
+    }));
+  }
+
+  // For form-based sign-in, verify user exists
+  if (!isJson && email) {
+    const existingUser = await db.query.users.findFirst({
+      where: eq(users.email, email),
+    });
+    if (!existingUser) {
+      return c.redirect(buildRedirectUrl(nextPath, {
+        error_code: AUTH_ERROR_CODES.USER_DOES_NOT_EXIST,
+        error_message: "USER_DOES_NOT_EXIST",
+      }));
+    }
   }
 
   try {
@@ -291,21 +559,174 @@ authRoutes.post("/magic-sign-in/", async (c) => {
 
     if (!result.ok) {
       const data = (await result.json()) as { message?: string };
-      return c.json(
-        { detail: data.message || "Invalid or expired magic link." },
-        400
-      );
+      if (isJson) {
+        return c.json(
+          { detail: data.message || "Invalid or expired magic link." },
+          400
+        );
+      }
+      return c.redirect(buildRedirectUrl(nextPath, {
+        error_code: 5090, // INVALID_MAGIC_CODE_SIGN_IN
+        error_message: "INVALID_MAGIC_CODE_SIGN_IN",
+      }));
     }
 
     const data = (await result.json()) as { user: Record<string, unknown>; token?: string };
+    const userId = data.user.id as string;
+    const userEmail = data.user.email as string;
 
-    return c.json({
-      user: formatUserResponse(data.user),
-      access_token: data.token,
-    });
+    // Post-login workflow: process accepted workspace invitations
+    await processWorkspaceInvitations(userId, userEmail);
+
+    if (isJson) {
+      return c.json({
+        user: formatUserResponse(data.user),
+        access_token: data.token,
+      });
+    }
+
+    // Form submission: redirect to appropriate path
+    const path = nextPath || await getRedirectionPath(userId, userEmail);
+    return c.redirect(buildRedirectUrl(path));
+
   } catch (error) {
     console.error("[Auth] Magic sign in error:", error);
-    return c.json({ detail: "Invalid or expired magic link." }, 400);
+    if (isJson) {
+      return c.json({ detail: "Invalid or expired magic link." }, 400);
+    }
+    return c.redirect(buildRedirectUrl(nextPath, {
+      error_code: AUTH_ERROR_CODES.AUTHENTICATION_FAILED_SIGN_IN,
+      error_message: "AUTHENTICATION_FAILED_SIGN_IN",
+    }));
+  }
+});
+
+// Magic link - sign up (for new users using magic code)
+// Matches Django's MagicSignUpEndpoint
+authRoutes.post("/magic-sign-up/", async (c) => {
+  let code: string | undefined;
+  let email: string | undefined;
+  let nextPath: string | undefined;
+
+  const contentType = c.req.header("content-type");
+  const isJson = contentType?.includes("application/json");
+
+  if (isJson) {
+    const body = await c.req.json();
+    code = body.code;
+    email = body.email;
+    nextPath = body.next_path;
+  } else {
+    const body = await c.req.parseBody();
+    code = (body["code"] as string)?.trim();
+    email = (body["email"] as string)?.trim().toLowerCase();
+    nextPath = body["next_path"] as string | undefined;
+  }
+
+  // Validate required fields
+  if (!code || !email) {
+    if (isJson) {
+      return c.json({ detail: "Email and code are required." }, 400);
+    }
+    return c.redirect(buildRedirectUrl(nextPath, {
+      error_code: AUTH_ERROR_CODES.MAGIC_SIGN_UP_EMAIL_CODE_REQUIRED,
+      error_message: "MAGIC_SIGN_UP_EMAIL_CODE_REQUIRED",
+    }));
+  }
+
+  email = email.trim().toLowerCase();
+
+  // Validate email
+  if (!isValidEmail(email)) {
+    if (isJson) {
+      return c.json({ detail: "Invalid email address." }, 400);
+    }
+    return c.redirect(buildRedirectUrl(nextPath, {
+      error_code: AUTH_ERROR_CODES.INVALID_EMAIL_MAGIC_SIGN_UP,
+      error_message: "INVALID_EMAIL_MAGIC_SIGN_UP",
+    }));
+  }
+
+  // Check if user already exists
+  const existingUser = await db.query.users.findFirst({
+    where: eq(users.email, email),
+  });
+
+  if (existingUser) {
+    if (isJson) {
+      return c.json({ detail: "A user with this email already exists." }, 400);
+    }
+    return c.redirect(buildRedirectUrl(nextPath, {
+      error_code: AUTH_ERROR_CODES.USER_ALREADY_EXIST,
+      error_message: "USER_ALREADY_EXIST",
+    }));
+  }
+
+  try {
+    // Verify magic code via Better Auth
+    const result = await auth.api.magicLinkVerify({
+      query: { token: code },
+      headers: c.req.raw.headers,
+      asResponse: true,
+    });
+
+    // Forward cookies
+    const setCookieHeaders = result.headers.getSetCookie();
+    for (const cookie of setCookieHeaders) {
+      c.header("Set-Cookie", cookie, { append: true });
+    }
+
+    if (!result.ok) {
+      const data = (await result.json()) as { message?: string };
+      if (isJson) {
+        return c.json({ detail: data.message || "Invalid or expired magic code." }, 400);
+      }
+      // Map to appropriate error code
+      const errorMessage = data.message || "";
+      const errorCode = errorMessage.includes("expired")
+        ? 5097 // EXPIRED_MAGIC_CODE_SIGN_UP
+        : 5092; // INVALID_MAGIC_CODE_SIGN_UP
+      return c.redirect(buildRedirectUrl(nextPath, {
+        error_code: errorCode,
+        error_message: errorMessage.includes("expired")
+          ? "EXPIRED_MAGIC_CODE_SIGN_UP"
+          : "INVALID_MAGIC_CODE_SIGN_UP",
+      }));
+    }
+
+    const data = (await result.json()) as { user: Record<string, unknown>; token?: string };
+    const userId = data.user.id as string;
+    const userEmail = data.user.email as string;
+
+    // Mark the user as having an auto-set password (since they signed up with magic link)
+    await db.update(users).set({
+      isPasswordAutoset: true,
+      updatedAt: new Date(),
+    }).where(eq(users.email, userEmail));
+
+    // Post-signup workflow: process accepted workspace invitations
+    await processWorkspaceInvitations(userId, userEmail);
+
+    if (isJson) {
+      return c.json({
+        user: formatUserResponse(data.user),
+        access_token: data.token,
+      });
+    }
+
+    // Form submission: redirect to appropriate path
+    const path = nextPath || await getRedirectionPath(userId, userEmail);
+    return c.redirect(buildRedirectUrl(path));
+
+  } catch (error) {
+    console.error("[Auth] Magic sign up error:", error);
+    if (isJson) {
+      return c.json({ detail: "Invalid or expired magic code." }, 400);
+    }
+    return c.redirect(buildRedirectUrl(nextPath, {
+      error_code: AUTH_ERROR_CODES.AUTHENTICATION_FAILED_SIGN_UP,
+      error_message: "AUTHENTICATION_FAILED_SIGN_UP",
+    }));
   }
 });
 

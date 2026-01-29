@@ -12,6 +12,7 @@ import { workspaceRoutes } from "./routes/workspaces";
 import { projectRoutes } from "./routes/projects";
 import { issueRoutes } from "./routes/issues";
 import { instanceRoutes } from "./routes/instances";
+import { workspaceSlugCheckRoutes } from "./routes/workspace-slug-check";
 
 
 // Types for context variables
@@ -95,7 +96,7 @@ app.get("/api/health/", (c) => {
   return c.json({
     status: "ok",
     timestamp: new Date().toISOString(),
-    version: "0.1.0",
+    version: "0.1.1",
   });
 });
 
@@ -109,6 +110,7 @@ app.route("/api/users", userRoutes);
 app.route("/api/workspaces", workspaceRoutes);
 app.route("/api/workspaces/:slug/projects", projectRoutes);
 app.route("/api/workspaces/:slug/projects/:projectId/issues", issueRoutes);
+app.route("/api/workspace-slug-check/", workspaceSlugCheckRoutes);
 
 // 404 handler
 app.notFound((c) => {

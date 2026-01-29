@@ -234,3 +234,4 @@ console.log(`
   WebSocket at ws://localhost:${port}/ws
   Environment: ${process.env.NODE_ENV || "development"}
 `);
+// Trigger reload
