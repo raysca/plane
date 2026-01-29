@@ -438,9 +438,11 @@ beforeAll(async () => {
       workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
       user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       role INTEGER NOT NULL DEFAULT 15,
+      company_role TEXT,
       is_active INTEGER DEFAULT 1,
       view_props TEXT,
       default_props TEXT,
+      issue_props TEXT,
       created_at INTEGER,
       updated_at INTEGER,
       UNIQUE(workspace_id, user_id)

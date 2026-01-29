@@ -120,11 +120,41 @@ function formatMember(
       last_name: user.lastName ?? "",
       display_name: user.displayName ?? user.name ?? "",
       avatar: user.avatar ?? user.image ?? "",
+      avatar_url: user.avatar ?? user.image ?? "",
+      is_bot: false,
     },
     role: m.role,
+    company_role: m.companyRole ?? null,
+    view_props: m.viewProps ?? {},
+    default_props: m.defaultProps ?? {},
+    issue_props: m.issueProps ?? {},
     is_active: m.isActive ?? true,
+    joining_date: m.createdAt?.toISOString() ?? null,
     created_at: m.createdAt?.toISOString() ?? null,
     updated_at: m.updatedAt?.toISOString() ?? null,
+  };
+}
+
+// Format for the /workspace-members/me/ endpoint (IWorkspaceMemberMe)
+function formatMemberMe(
+  m: typeof workspaceMembers.$inferSelect,
+  draftIssueCount: number = 0
+) {
+  return {
+    id: m.id,
+    member: m.userId,
+    workspace: m.workspaceId,
+    role: m.role,
+    company_role: m.companyRole ?? null,
+    view_props: m.viewProps ?? {},
+    default_props: m.defaultProps ?? {},
+    issue_props: m.issueProps ?? {},
+    is_active: m.isActive ?? true,
+    draft_issue_count: draftIssueCount,
+    created_at: m.createdAt?.toISOString() ?? null,
+    updated_at: m.updatedAt?.toISOString() ?? null,
+    created_by: null,
+    updated_by: null,
   };
 }
 
@@ -428,7 +458,7 @@ workspaceRoutes.delete("/:slug/", requireWorkspaceOwner, async (c) => {
 // 3.2 Workspace Members
 // =====================================================
 
-// GET /api/workspaces/:slug/members/ - List members
+// GET /api/workspaces/:slug/members/ - List active members
 workspaceRoutes.get("/:slug/members/", async (c) => {
   const workspace = c.get("workspace");
   if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
@@ -440,7 +470,10 @@ workspaceRoutes.get("/:slug/members/", async (c) => {
     })
     .from(workspaceMembers)
     .innerJoin(users, eq(workspaceMembers.userId, users.id))
-    .where(eq(workspaceMembers.workspaceId, workspace.id));
+    .where(and(
+      eq(workspaceMembers.workspaceId, workspace.id),
+      eq(workspaceMembers.isActive, true)
+    ));
 
   const results = members.map((m) => formatMember(m.membership, m.user));
 
@@ -488,10 +521,9 @@ workspaceRoutes.post("/:slug/members/", requireWorkspaceAdmin, zValidator("json"
 // GET /api/workspaces/:slug/members/me/ - Current member info
 workspaceRoutes.get("/:slug/members/me/", async (c) => {
   const workspace = c.get("workspace");
-  const membership = c.get("workspaceMembership");
   const user = c.get("user");
 
-  if (!workspace || !membership || !user) {
+  if (!workspace || !user) {
     return c.json({ detail: "Not found." }, 404);
   }
 
@@ -504,16 +536,20 @@ workspaceRoutes.get("/:slug/members/me/", async (c) => {
   const dbMembership = await db.query.workspaceMembers.findFirst({
     where: and(
       eq(workspaceMembers.workspaceId, workspace.id),
-      eq(workspaceMembers.userId, user.id)
+      eq(workspaceMembers.userId, user.id),
+      eq(workspaceMembers.isActive, true)
     ),
   });
 
-  return c.json(formatMember(dbMembership!, dbUser));
+  if (!dbMembership) return c.json({ detail: "Member not found." }, 404);
+
+  return c.json(formatMember(dbMembership, dbUser));
 });
 
 // PATCH /api/workspaces/:slug/members/:memberId/ - Update member role
 workspaceRoutes.patch("/:slug/members/:memberId/", requireWorkspaceAdmin, zValidator("json", updateMemberSchema), async (c) => {
   const workspace = c.get("workspace");
+  const requestingUser = c.get("user");
   if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
 
   const memberId = c.req.param("memberId");
@@ -522,7 +558,8 @@ workspaceRoutes.patch("/:slug/members/:memberId/", requireWorkspaceAdmin, zValid
   const membership = await db.query.workspaceMembers.findFirst({
     where: and(
       eq(workspaceMembers.id, memberId),
-      eq(workspaceMembers.workspaceId, workspace.id)
+      eq(workspaceMembers.workspaceId, workspace.id),
+      eq(workspaceMembers.isActive, true)
     ),
   });
 
@@ -530,9 +567,9 @@ workspaceRoutes.patch("/:slug/members/:memberId/", requireWorkspaceAdmin, zValid
     return c.json({ detail: "Member not found." }, 404);
   }
 
-  // Cannot change owner's role
-  if (membership.userId === workspace.ownerId && role !== ROLES.ADMIN) {
-    return c.json({ detail: "Cannot change the workspace owner's role." }, 400);
+  // Cannot update your own role
+  if (requestingUser && membership.userId === requestingUser.id) {
+    return c.json({ error: "You cannot update your own role" }, 400);
   }
 
   await db.update(workspaceMembers).set({
@@ -551,9 +588,11 @@ workspaceRoutes.patch("/:slug/members/:memberId/", requireWorkspaceAdmin, zValid
   return c.json(formatMember(updated!, memberUser!));
 });
 
-// DELETE /api/workspaces/:slug/members/:memberId/ - Remove member
+// DELETE /api/workspaces/:slug/members/:memberId/ - Remove member (soft-delete)
 workspaceRoutes.delete("/:slug/members/:memberId/", requireWorkspaceAdmin, async (c) => {
   const workspace = c.get("workspace");
+  const requestingUser = c.get("user");
+  const requestingMembership = c.get("workspaceMembership");
   if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
 
   const memberId = c.req.param("memberId");
@@ -561,7 +600,8 @@ workspaceRoutes.delete("/:slug/members/:memberId/", requireWorkspaceAdmin, async
   const membership = await db.query.workspaceMembers.findFirst({
     where: and(
       eq(workspaceMembers.id, memberId),
-      eq(workspaceMembers.workspaceId, workspace.id)
+      eq(workspaceMembers.workspaceId, workspace.id),
+      eq(workspaceMembers.isActive, true)
     ),
   });
 
@@ -569,12 +609,127 @@ workspaceRoutes.delete("/:slug/members/:memberId/", requireWorkspaceAdmin, async
     return c.json({ detail: "Member not found." }, 404);
   }
 
-  // Cannot remove workspace owner
-  if (membership.userId === workspace.ownerId) {
-    return c.json({ detail: "Cannot remove the workspace owner." }, 400);
+  // Cannot remove yourself (use leave endpoint)
+  if (requestingUser && membership.userId === requestingUser.id) {
+    return c.json(
+      { error: "You cannot remove yourself from the workspace. Please use leave workspace" },
+      400
+    );
   }
 
-  await db.delete(workspaceMembers).where(eq(workspaceMembers.id, memberId));
+  // Cannot remove someone with a higher role
+  if (requestingMembership && requestingMembership.role < membership.role) {
+    return c.json(
+      { error: "You cannot remove a user having role higher than you" },
+      400
+    );
+  }
+
+  // Soft-delete: set isActive to false
+  await db.update(workspaceMembers).set({
+    isActive: false,
+    updatedAt: new Date(),
+  }).where(eq(workspaceMembers.id, memberId));
+
+  return new Response(null, { status: 204 });
+});
+
+// POST /api/workspaces/:slug/members/leave/ - Leave workspace
+workspaceRoutes.post("/:slug/members/leave/", async (c) => {
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const membership = await db.query.workspaceMembers.findFirst({
+    where: and(
+      eq(workspaceMembers.workspaceId, workspace.id),
+      eq(workspaceMembers.userId, user.id),
+      eq(workspaceMembers.isActive, true)
+    ),
+  });
+
+  if (!membership) {
+    return c.json({ detail: "Member not found." }, 404);
+  }
+
+  // If user is admin, check if they are the sole admin
+  if (membership.role === ROLES.ADMIN) {
+    const adminCount = await db.select()
+      .from(workspaceMembers)
+      .where(and(
+        eq(workspaceMembers.workspaceId, workspace.id),
+        eq(workspaceMembers.role, ROLES.ADMIN),
+        eq(workspaceMembers.isActive, true)
+      ))
+      .then((rows) => rows.length);
+
+    if (adminCount <= 1) {
+      return c.json(
+        {
+          error: "You cannot leave the workspace as you are the only admin of the workspace you will have to either delete the workspace or promote another user to admin."
+        },
+        400
+      );
+    }
+  }
+
+  // Soft-delete: set isActive to false
+  await db.update(workspaceMembers).set({
+    isActive: false,
+    updatedAt: new Date(),
+  }).where(eq(workspaceMembers.id, membership.id));
+
+  return new Response(null, { status: 204 });
+});
+
+// GET /api/workspaces/:slug/workspace-members/me/ - Current user's workspace membership (IWorkspaceMemberMe format)
+workspaceRoutes.get("/:slug/workspace-members/me/", async (c) => {
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const membership = await db.query.workspaceMembers.findFirst({
+    where: and(
+      eq(workspaceMembers.workspaceId, workspace.id),
+      eq(workspaceMembers.userId, user.id),
+      eq(workspaceMembers.isActive, true)
+    ),
+  });
+
+  if (!membership) {
+    return c.json({ detail: "Workspace member not found." }, 404);
+  }
+
+  // Draft issue count - defaults to 0 since draft_issues table doesn't exist yet
+  const draftIssueCount = 0;
+
+  return c.json(formatMemberMe(membership, draftIssueCount));
+});
+
+// POST /api/workspaces/:slug/workspace-views/ - Update workspace member view props
+workspaceRoutes.post("/:slug/workspace-views/", async (c) => {
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const membership = await db.query.workspaceMembers.findFirst({
+    where: and(
+      eq(workspaceMembers.workspaceId, workspace.id),
+      eq(workspaceMembers.userId, user.id),
+      eq(workspaceMembers.isActive, true)
+    ),
+  });
+
+  if (!membership) {
+    return c.json({ detail: "Workspace member not found." }, 404);
+  }
+
+  const body = await c.req.json() as { view_props?: unknown };
+
+  await db.update(workspaceMembers).set({
+    viewProps: body.view_props as any,
+    updatedAt: new Date(),
+  }).where(eq(workspaceMembers.id, membership.id));
 
   return new Response(null, { status: 204 });
 });

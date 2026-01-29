@@ -43,9 +43,11 @@ export const workspaceMembers = sqliteTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     role: integer("role").notNull().default(15), // 5=Guest, 10=Viewer, 15=Member, 20=Admin
+    companyRole: text("company_role"),
     isActive: integer("is_active", { mode: "boolean" }).default(true),
     viewProps: text("view_props", { mode: "json" }),
     defaultProps: text("default_props", { mode: "json" }),
+    issueProps: text("issue_props", { mode: "json" }),
     createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
     updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
   },
