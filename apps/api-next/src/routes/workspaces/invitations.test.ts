@@ -81,23 +81,34 @@ function buildTestApp() {
     if (!userId) {
       return c.json({ detail: "Authentication credentials were not provided." }, 401);
     }
-    const user = await testDb.query.users.findFirst({ where: eq(users.id, userId) });
+
+    // Join users with profiles
+    const user = await testDb.select({
+      user: users,
+      profile: schema.userProfiles,
+    })
+      .from(users)
+      .leftJoin(schema.userProfiles, eq(users.id, schema.userProfiles.userId))
+      .where(eq(users.id, userId))
+      .get();
+
     if (!user) {
       return c.json({ detail: "Authentication credentials were not provided." }, 401);
     }
+
     c.set("user", {
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      username: user.username || null,
-      displayName: user.displayName || null,
-      avatar: user.avatar || null,
-      isOnboarded: user.isOnboarded || false,
-      isActive: user.isActive ?? true,
-      createdAt: user.createdAt ?? new Date(),
-      updatedAt: user.updatedAt ?? new Date(),
+      id: user.user.id,
+      email: user.user.email,
+      name: user.user.name,
+      username: user.user.username || null,
+      displayName: user.user.displayName || null,
+      avatar: user.user.avatar || null,
+      isOnboarded: user.profile?.isOnboarded || false,
+      isActive: user.user.isActive ?? true,
+      createdAt: user.user.createdAt ?? new Date(),
+      updatedAt: user.user.updatedAt ?? new Date(),
     });
-    c.set("session", { id: "test-session", userId: user.id, expiresAt: new Date(Date.now() + 86400000) });
+    c.set("session", { id: "test-session", userId: user.user.id, expiresAt: new Date(Date.now() + 86400000) });
     await next();
   });
 
@@ -430,14 +441,34 @@ beforeAll(async () => {
       cover_image TEXT,
       first_name TEXT,
       last_name TEXT,
-      is_onboarded INTEGER DEFAULT 0,
       is_active INTEGER DEFAULT 1,
-      is_tour_completed INTEGER DEFAULT 0,
       is_password_autoset INTEGER DEFAULT 0,
-      onboarding_step INTEGER DEFAULT 0,
       created_at INTEGER,
       updated_at INTEGER,
       last_login_at INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS user_profiles (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      is_onboarded INTEGER DEFAULT 0,
+      is_tour_completed INTEGER DEFAULT 0,
+      onboarding_step TEXT DEFAULT '{}',
+      role TEXT,
+      use_case TEXT,
+      billing_address TEXT,
+      billing_address_country TEXT,
+      company_name TEXT,
+      has_marketing_email_consent INTEGER DEFAULT 0,
+      theme TEXT DEFAULT '{}',
+      language TEXT DEFAULT 'en',
+      timezone TEXT DEFAULT 'UTC',
+      date_format TEXT DEFAULT 'MM/DD/YYYY',
+      time_format TEXT DEFAULT '12h',
+      last_workspace_id TEXT,
+      created_at INTEGER,
+      updated_at INTEGER,
+      UNIQUE(user_id)
     );
 
     CREATE TABLE IF NOT EXISTS workspaces (
@@ -483,6 +514,14 @@ beforeAll(async () => {
   const now = Date.now();
   for (const u of [adminUser, memberUser, invitedUser, outsideUser]) {
     await testDb.insert(users).values({ ...u, createdAt: new Date(now), updatedAt: new Date(now) });
+    await testDb.insert(schema.userProfiles).values({
+      id: createId(),
+      userId: u.id,
+      isOnboarded: true,
+      onboardingStep: { profile_complete: true, workspace_create: true, workspace_invite: true, workspace_join: true },
+      createdAt: new Date(now),
+      updatedAt: new Date(now)
+    });
   }
 
   await testDb.insert(workspaces).values({ ...testWorkspace, createdAt: new Date(now), updatedAt: new Date(now) });

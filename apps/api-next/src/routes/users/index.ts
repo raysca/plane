@@ -24,7 +24,10 @@ const userRoutes = new Hono<{ Variables: Variables }>();
 userRoutes.use("*", authMiddleware);
 
 // Helper to format user for API response (snake_case)
-function formatUserResponse(user: typeof users.$inferSelect) {
+function formatUserResponse(
+  user: typeof users.$inferSelect,
+  profile?: typeof userProfiles.$inferSelect
+) {
   return {
     id: user.id,
     email: user.email,
@@ -34,10 +37,10 @@ function formatUserResponse(user: typeof users.$inferSelect) {
     display_name: user.displayName ?? user.name ?? "",
     avatar: user.avatar ?? user.image ?? "",
     cover_image: user.coverImage ?? "",
-    is_onboarded: user.isOnboarded ?? false,
+    is_onboarded: profile?.isOnboarded ?? false,
     is_active: user.isActive ?? true,
-    is_tour_completed: user.isTourCompleted ?? false,
-    onboarding_step: user.onboardingStep ?? 0,
+    is_tour_completed: profile?.isTourCompleted ?? false,
+    onboarding_step: profile?.onboardingStep ?? {},
     created_at: user.createdAt?.toISOString() ?? null,
     updated_at: user.updatedAt?.toISOString() ?? null,
     last_login_at: user.lastLoginAt?.toISOString() ?? null,
@@ -54,6 +57,21 @@ function formatProfileResponse(profile: typeof userProfiles.$inferSelect) {
     time_format: profile.timeFormat ?? "12h",
     theme: profile.theme ?? "system",
     language: profile.language ?? "en",
+    role: profile.role ?? "",
+    use_case: profile.useCase ?? "",
+    last_workspace_id: profile.lastWorkspaceId ?? null,
+    onboarding_step: profile.onboardingStep ?? {
+      profile_complete: false,
+      workspace_create: false,
+      workspace_invite: false,
+      workspace_join: false,
+    },
+    is_onboarded: profile.isOnboarded ?? false,
+    is_tour_completed: profile.isTourCompleted ?? false,
+    billing_address_country: profile.billingAddressCountry ?? "INDIA",
+    billing_address: profile.billingAddress ?? null,
+    company_name: profile.companyName ?? "",
+    has_marketing_email_consent: profile.hasMarketingEmailConsent ?? false,
     created_at: profile.createdAt?.toISOString() ?? null,
     updated_at: profile.updatedAt?.toISOString() ?? null,
   };
@@ -84,15 +102,37 @@ const updateUserSchema = z.object({
   cover_image: z.string().url().optional().nullable(),
   is_onboarded: z.boolean().optional(),
   is_tour_completed: z.boolean().optional(),
-  onboarding_step: z.number().int().min(0).max(10).optional(),
+  is_active: z.boolean().optional(),
+  onboarding_step: z.object({
+    profile_complete: z.boolean().optional(),
+    workspace_create: z.boolean().optional(),
+    workspace_invite: z.boolean().optional(),
+    workspace_join: z.boolean().optional(),
+  }).optional(),
 });
 
 const updateProfileSchema = z.object({
   timezone: z.string().max(50).optional(),
   date_format: z.string().max(20).optional(),
   time_format: z.enum(["12h", "24h"]).optional(),
-  theme: z.enum(["light", "dark", "system"]).optional(),
+  theme: z.string().max(50).optional(),
   language: z.string().max(10).optional(),
+  // Onboarding fields
+  role: z.string().max(300).optional(),
+  use_case: z.string().optional(),
+  last_workspace_id: z.string().optional().nullable(),
+  onboarding_step: z.object({
+    profile_complete: z.boolean().optional(),
+    workspace_create: z.boolean().optional(),
+    workspace_invite: z.boolean().optional(),
+    workspace_join: z.boolean().optional(),
+  }).optional(),
+  is_onboarded: z.boolean().optional(),
+  is_tour_completed: z.boolean().optional(),
+  billing_address_country: z.string().max(100).optional(),
+  billing_address: z.any().optional(),
+  company_name: z.string().max(255).optional(),
+  has_marketing_email_consent: z.boolean().optional(),
 });
 
 const updateNotificationPrefsSchema = z.object({
@@ -139,6 +179,7 @@ async function getOrCreateNotificationPrefs(userId: string) {
   return prefs!;
 }
 
+
 // GET /api/users/me/ - Get current user
 userRoutes.get("/me/", async (c) => {
   const contextUser = c.get("user");
@@ -148,13 +189,16 @@ userRoutes.get("/me/", async (c) => {
 
   const user = await db.query.users.findFirst({
     where: eq(users.id, contextUser.id),
+    with: {
+      profile: true,
+    },
   });
 
   if (!user) {
     return c.json({ detail: "User not found." }, 404);
   }
 
-  return c.json(formatUserResponse(user));
+  return c.json(formatUserResponse(user, user.profile));
 });
 
 // PATCH /api/users/me/ - Update current user
@@ -184,23 +228,55 @@ userRoutes.patch("/me/", zValidator("json", updateUserSchema), async (c) => {
     ...(body.username !== undefined && { username: body.username }),
     ...(body.avatar !== undefined && { avatar: body.avatar }),
     ...(body.cover_image !== undefined && { coverImage: body.cover_image }),
-    ...(body.is_onboarded !== undefined && { isOnboarded: body.is_onboarded }),
-    ...(body.is_tour_completed !== undefined && { isTourCompleted: body.is_tour_completed }),
-    ...(body.onboarding_step !== undefined && { onboardingStep: body.onboarding_step }),
+    ...(body.is_active !== undefined && { isActive: body.is_active }),
     updatedAt: new Date(),
   };
 
-  await db.update(users).set(updateData).where(eq(users.id, contextUser.id));
+  if (Object.keys(updateData).length > 1) { // > 1 because updatedAt is always there
+    await db.update(users).set(updateData).where(eq(users.id, contextUser.id));
+  }
+
+  // Handle profile updates (onboarding fields)
+  const profileUpdateData: Partial<typeof userProfiles.$inferInsert> = {
+    ...(body.is_onboarded !== undefined && { isOnboarded: body.is_onboarded }),
+    ...(body.is_tour_completed !== undefined && { isTourCompleted: body.is_tour_completed }),
+  };
+
+  if (body.onboarding_step || Object.keys(profileUpdateData).length > 0) {
+    const profile = await getOrCreateProfile(contextUser.id);
+
+    if (body.onboarding_step) {
+      const currentStep = (profile.onboardingStep as any) || {
+        profile_complete: false,
+        workspace_create: false,
+        workspace_invite: false,
+        workspace_join: false
+      };
+
+      profileUpdateData.onboardingStep = {
+        ...currentStep,
+        ...body.onboarding_step
+      };
+    }
+
+    await db.update(userProfiles).set({
+      ...profileUpdateData,
+      updatedAt: new Date(),
+    }).where(eq(userProfiles.userId, contextUser.id));
+  }
 
   const updatedUser = await db.query.users.findFirst({
     where: eq(users.id, contextUser.id),
+    with: {
+      profile: true,
+    },
   });
 
   if (!updatedUser) {
     return c.json({ detail: "User not found." }, 404);
   }
 
-  return c.json(formatUserResponse(updatedUser));
+  return c.json(formatUserResponse(updatedUser, updatedUser.profile));
 });
 
 // GET /api/users/me/profile/ - Get user profile
@@ -224,16 +300,39 @@ userRoutes.patch("/me/profile/", zValidator("json", updateProfileSchema), async 
   const body = c.req.valid("json");
 
   // Ensure profile exists
-  await getOrCreateProfile(contextUser.id);
+  const existingProfile = await getOrCreateProfile(contextUser.id);
 
-  const updateData = {
+  const updateData: Record<string, unknown> = {
     ...(body.timezone !== undefined && { timezone: body.timezone }),
     ...(body.date_format !== undefined && { dateFormat: body.date_format }),
     ...(body.time_format !== undefined && { timeFormat: body.time_format }),
     ...(body.theme !== undefined && { theme: body.theme }),
     ...(body.language !== undefined && { language: body.language }),
+    ...(body.role !== undefined && { role: body.role }),
+    ...(body.use_case !== undefined && { useCase: body.use_case }),
+    ...(body.last_workspace_id !== undefined && { lastWorkspaceId: body.last_workspace_id }),
+    ...(body.is_onboarded !== undefined && { isOnboarded: body.is_onboarded }),
+    ...(body.is_tour_completed !== undefined && { isTourCompleted: body.is_tour_completed }),
+    ...(body.billing_address_country !== undefined && { billingAddressCountry: body.billing_address_country }),
+    ...(body.billing_address !== undefined && { billingAddress: body.billing_address }),
+    ...(body.company_name !== undefined && { companyName: body.company_name }),
+    ...(body.has_marketing_email_consent !== undefined && { hasMarketingEmailConsent: body.has_marketing_email_consent }),
     updatedAt: new Date(),
   };
+
+  // Handle onboarding_step merge (partial update)
+  if (body.onboarding_step) {
+    const currentStep = (existingProfile.onboardingStep as Record<string, boolean>) || {
+      profile_complete: false,
+      workspace_create: false,
+      workspace_invite: false,
+      workspace_join: false,
+    };
+    updateData.onboardingStep = {
+      ...currentStep,
+      ...body.onboarding_step,
+    };
+  }
 
   await db.update(userProfiles).set(updateData).where(eq(userProfiles.userId, contextUser.id));
 
@@ -252,20 +351,10 @@ userRoutes.get("/me/settings/", async (c) => {
   }
 
   const profile = await getOrCreateProfile(contextUser.id);
-
-  // Settings combines profile data with user display preferences
-  return c.json({
-    id: profile.id,
-    user_id: profile.userId,
-    timezone: profile.timezone ?? "UTC",
-    date_format: profile.dateFormat ?? "MM/DD/YYYY",
-    time_format: profile.timeFormat ?? "12h",
-    theme: profile.theme ?? "system",
-    language: profile.language ?? "en",
-  });
+  return c.json(formatProfileResponse(profile));
 });
 
-// PATCH /api/users/me/settings/ - Update user settings
+// PATCH /api/users/me/settings/ - Update user settings (same as profile)
 userRoutes.patch("/me/settings/", zValidator("json", updateProfileSchema), async (c) => {
   const contextUser = c.get("user");
   if (!contextUser) {
@@ -273,18 +362,38 @@ userRoutes.patch("/me/settings/", zValidator("json", updateProfileSchema), async
   }
 
   const body = c.req.valid("json");
+  const existingProfile = await getOrCreateProfile(contextUser.id);
 
-  // Ensure profile exists
-  await getOrCreateProfile(contextUser.id);
-
-  const updateData = {
+  const updateData: Record<string, unknown> = {
     ...(body.timezone !== undefined && { timezone: body.timezone }),
     ...(body.date_format !== undefined && { dateFormat: body.date_format }),
     ...(body.time_format !== undefined && { timeFormat: body.time_format }),
     ...(body.theme !== undefined && { theme: body.theme }),
     ...(body.language !== undefined && { language: body.language }),
+    ...(body.role !== undefined && { role: body.role }),
+    ...(body.use_case !== undefined && { useCase: body.use_case }),
+    ...(body.last_workspace_id !== undefined && { lastWorkspaceId: body.last_workspace_id }),
+    ...(body.is_onboarded !== undefined && { isOnboarded: body.is_onboarded }),
+    ...(body.is_tour_completed !== undefined && { isTourCompleted: body.is_tour_completed }),
+    ...(body.billing_address_country !== undefined && { billingAddressCountry: body.billing_address_country }),
+    ...(body.billing_address !== undefined && { billingAddress: body.billing_address }),
+    ...(body.company_name !== undefined && { companyName: body.company_name }),
+    ...(body.has_marketing_email_consent !== undefined && { hasMarketingEmailConsent: body.has_marketing_email_consent }),
     updatedAt: new Date(),
   };
+
+  if (body.onboarding_step) {
+    const currentStep = (existingProfile.onboardingStep as Record<string, boolean>) || {
+      profile_complete: false,
+      workspace_create: false,
+      workspace_invite: false,
+      workspace_join: false,
+    };
+    updateData.onboardingStep = {
+      ...currentStep,
+      ...body.onboarding_step,
+    };
+  }
 
   await db.update(userProfiles).set(updateData).where(eq(userProfiles.userId, contextUser.id));
 
@@ -292,16 +401,52 @@ userRoutes.patch("/me/settings/", zValidator("json", updateProfileSchema), async
     where: eq(userProfiles.userId, contextUser.id),
   });
 
-  return c.json({
-    id: profile!.id,
-    user_id: profile!.userId,
-    timezone: profile!.timezone ?? "UTC",
-    date_format: profile!.dateFormat ?? "MM/DD/YYYY",
-    time_format: profile!.timeFormat ?? "12h",
-    theme: profile!.theme ?? "system",
-    language: profile!.language ?? "en",
-  });
+  return c.json(formatProfileResponse(profile!));
 });
+
+// PATCH /api/users/me/onboard/ - Update onboarding status
+userRoutes.patch(
+  "/me/onboard/",
+  zValidator("json", z.object({ is_onboarded: z.boolean().default(true) })),
+  async (c) => {
+    const contextUser = c.get("user");
+    if (!contextUser) {
+      return c.json({ detail: "Authentication required." }, 401);
+    }
+
+    const { is_onboarded } = c.req.valid("json");
+    await getOrCreateProfile(contextUser.id);
+
+    await db.update(userProfiles).set({
+      isOnboarded: is_onboarded,
+      updatedAt: new Date(),
+    }).where(eq(userProfiles.userId, contextUser.id));
+
+    return c.json({ message: "Updated successfully" }, 200);
+  }
+);
+
+// PATCH /api/users/me/tour-completed/ - Update tour status
+userRoutes.patch(
+  "/me/tour-completed/",
+  zValidator("json", z.object({ is_tour_completed: z.boolean().default(true) })),
+  async (c) => {
+    const contextUser = c.get("user");
+    if (!contextUser) {
+      return c.json({ detail: "Authentication required." }, 401);
+    }
+
+    const { is_tour_completed } = c.req.valid("json");
+    await getOrCreateProfile(contextUser.id);
+
+    await db.update(userProfiles).set({
+      isTourCompleted: is_tour_completed,
+      updatedAt: new Date(),
+    }).where(eq(userProfiles.userId, contextUser.id));
+
+    return c.json({ message: "Updated successfully" }, 200);
+  }
+);
 
 // GET /api/users/me/accounts/ - Get linked OAuth accounts
 userRoutes.get("/me/accounts/", async (c) => {

@@ -7,7 +7,7 @@ import { createId } from "@paralleldrive/cuid2";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import * as schema from "../../db/schema";
-import { users } from "../../db/schema/user";
+import { users, userProfiles } from "../../db/schema/user";
 import {
   workspaces,
   workspaceMembers,
@@ -57,8 +57,8 @@ function isValidEmail(email: string): boolean {
 
 async function getRedirectionPath(userId: string, email: string): Promise<string> {
   const { asc } = require("drizzle-orm");
-  const user = await testDb.query.users.findFirst({ where: eq(users.id, userId) });
-  if (!user?.isOnboarded) return "/onboarding";
+  const profile = await testDb.query.userProfiles.findFirst({ where: eq(userProfiles.userId, userId) });
+  if (!profile?.isOnboarded) return "/onboarding";
 
   const memberships = await testDb
     .select({ workspace: workspaces })
@@ -107,7 +107,6 @@ const existingUser = {
   email: "existing@test.com",
   name: "Existing User",
   isActive: true,
-  isOnboarded: true,
 };
 
 const testWorkspace = {
@@ -357,14 +356,33 @@ beforeAll(async () => {
       cover_image TEXT,
       first_name TEXT,
       last_name TEXT,
-      is_onboarded INTEGER DEFAULT 0,
       is_active INTEGER DEFAULT 1,
-      is_tour_completed INTEGER DEFAULT 0,
       is_password_autoset INTEGER DEFAULT 0,
-      onboarding_step INTEGER DEFAULT 0,
       created_at INTEGER,
       updated_at INTEGER,
       last_login_at INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS user_profiles (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+      timezone TEXT DEFAULT 'UTC',
+      date_format TEXT DEFAULT 'MM/DD/YYYY',
+      time_format TEXT DEFAULT '12h',
+      theme TEXT DEFAULT 'system',
+      language TEXT DEFAULT 'en',
+      last_workspace_id TEXT,
+      role TEXT,
+      use_case TEXT,
+      onboarding_step TEXT,
+      is_tour_completed INTEGER DEFAULT 0,
+      is_onboarded INTEGER DEFAULT 0,
+      billing_address TEXT,
+      billing_address_country TEXT DEFAULT 'INDIA',
+      company_name TEXT,
+      has_marketing_email_consent INTEGER DEFAULT 0,
+      created_at INTEGER,
+      updated_at INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS workspaces (
@@ -406,8 +424,13 @@ beforeAll(async () => {
     );
   `);
 
-  // Seed existing user
+  // Seed existing user and profile
   await testDb.insert(users).values(existingUser);
+  await testDb.insert(userProfiles).values({
+    id: createId(),
+    userId: existingUser.id,
+    isOnboarded: true,
+  });
 
   // Seed workspace
   testWorkspace.ownerId = existingUser.id;
@@ -668,8 +691,8 @@ describe("Redirection path logic", () => {
       id: userId,
       email: "not-onboarded@test.com",
       name: "Not Onboarded",
-      isOnboarded: false,
     });
+    // No profile or profile with isOnboarded=false → /onboarding
 
     const path = await getRedirectionPath(userId, "not-onboarded@test.com");
     expect(path).toBe("/onboarding");
@@ -687,6 +710,10 @@ describe("Redirection path logic", () => {
       id: userId,
       email,
       name: "Has Invitations",
+    });
+    await testDb.insert(userProfiles).values({
+      id: createId(),
+      userId,
       isOnboarded: true,
     });
     await testDb.insert(workspaceInvitations).values({
@@ -708,6 +735,10 @@ describe("Redirection path logic", () => {
       id: userId,
       email,
       name: "Lonely User",
+    });
+    await testDb.insert(userProfiles).values({
+      id: createId(),
+      userId,
       isOnboarded: true,
     });
 

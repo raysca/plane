@@ -121,21 +121,9 @@ export const auth = betterAuth({
         type: "string",
         required: false,
       },
-      isOnboarded: {
-        type: "boolean",
-        defaultValue: false,
-      },
       isActive: {
         type: "boolean",
         defaultValue: true,
-      },
-      isTourCompleted: {
-        type: "boolean",
-        defaultValue: false,
-      },
-      onboardingStep: {
-        type: "number",
-        defaultValue: 0,
       },
     },
   },

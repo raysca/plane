@@ -1,6 +1,9 @@
 import { createMiddleware } from "hono/factory";
 import type { Variables } from "../app";
 import { auth } from "../lib/auth";
+import { db } from "../db";
+import { userProfiles } from "../db/schema/user";
+import { eq } from "drizzle-orm";
 
 // Role constants (match Django)
 export const ROLES = {
@@ -30,6 +33,11 @@ export const authMiddleware = createMiddleware<{ Variables: Variables }>(async (
       return c.json({ detail: "User account is disabled." }, 403);
     }
 
+    // Fetch user profile for extended fields
+    const profile = await db.query.userProfiles.findFirst({
+      where: eq(userProfiles.userId, session.user.id),
+    });
+
     // Set user in context with proper types
     c.set("user", {
       id: session.user.id,
@@ -38,7 +46,7 @@ export const authMiddleware = createMiddleware<{ Variables: Variables }>(async (
       username: session.user.username || null,
       displayName: session.user.displayName || null,
       avatar: session.user.avatar || null,
-      isOnboarded: session.user.isOnboarded || false,
+      isOnboarded: profile?.isOnboarded ?? false,
       isActive: session.user.isActive ?? true,
       createdAt: session.user.createdAt ? new Date(session.user.createdAt) : new Date(),
       updatedAt: session.user.updatedAt ? new Date(session.user.updatedAt) : new Date(),
@@ -67,6 +75,11 @@ export const optionalAuthMiddleware = createMiddleware<{ Variables: Variables }>
       const session = await auth.api.getSession({ headers: c.req.raw.headers });
 
       if (session?.user && session.user.isActive) {
+        // Fetch user profile for extended fields
+        const profile = await db.query.userProfiles.findFirst({
+          where: eq(userProfiles.userId, session.user.id),
+        });
+
         c.set("user", {
           id: session.user.id,
           email: session.user.email,
@@ -74,7 +87,7 @@ export const optionalAuthMiddleware = createMiddleware<{ Variables: Variables }>
           username: session.user.username || null,
           displayName: session.user.displayName || null,
           avatar: session.user.avatar || null,
-          isOnboarded: session.user.isOnboarded || false,
+          isOnboarded: profile?.isOnboarded ?? false,
           isActive: session.user.isActive ?? true,
           createdAt: session.user.createdAt ? new Date(session.user.createdAt) : new Date(),
           updatedAt: session.user.updatedAt ? new Date(session.user.updatedAt) : new Date(),

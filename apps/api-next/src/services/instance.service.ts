@@ -103,7 +103,6 @@ export class InstanceService {
             firstName: data.first_name,
             lastName: data.last_name,
             isActive: true,
-            isOnboarded: true,
         }).returning();
 
         if (!newUser[0]) throw new Error("Failed to create user");
@@ -120,6 +119,7 @@ export class InstanceService {
 
         await db.insert(userProfiles).values({
             userId: newUser[0].id,
+            isOnboarded: true,
         });
 
         if (!instance) throw new Error("Instance missing");

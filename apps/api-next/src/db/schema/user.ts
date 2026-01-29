@@ -21,11 +21,8 @@ export const users = sqliteTable(
     coverImage: text("cover_image"),
     firstName: text("first_name"),
     lastName: text("last_name"),
-    isOnboarded: integer("is_onboarded", { mode: "boolean" }).default(false),
     isActive: integer("is_active", { mode: "boolean" }).default(true),
-    isTourCompleted: integer("is_tour_completed", { mode: "boolean" }).default(false),
     isPasswordAutoset: integer("is_password_autoset", { mode: "boolean" }).default(false),
-    onboardingStep: integer("onboarding_step").default(0),
 
     // Timestamps
     createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
@@ -113,6 +110,32 @@ export const userProfiles = sqliteTable("user_profiles", {
   theme: text("theme").default("system"),
   language: text("language").default("en"),
   lastWorkspaceId: text("last_workspace_id"),
+
+  // Onboarding
+  role: text("role"),
+  useCase: text("use_case"),
+  onboardingStep: text("onboarding_step", { mode: "json" }).$type<{
+    profile_complete: boolean;
+    workspace_create: boolean;
+    workspace_invite: boolean;
+    workspace_join: boolean;
+  }>().default({
+    profile_complete: false,
+    workspace_create: false,
+    workspace_invite: false,
+    workspace_join: false,
+  }),
+  isTourCompleted: integer("is_tour_completed", { mode: "boolean" }).default(false),
+  isOnboarded: integer("is_onboarded", { mode: "boolean" }).default(false),
+
+  // Billing & Company
+  billingAddress: text("billing_address", { mode: "json" }).$type<any>(),
+  billingAddressCountry: text("billing_address_country").default("INDIA"),
+  companyName: text("company_name"),
+
+  // Marketing
+  hasMarketingEmailConsent: integer("has_marketing_email_consent", { mode: "boolean" }).default(false),
+
   createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
   updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
 });

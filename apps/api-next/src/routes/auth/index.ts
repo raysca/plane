@@ -110,9 +110,12 @@ async function getRedirectionPath(userId: string, email: string): Promise<string
   // Check if user is onboarded
   const user = await db.query.users.findFirst({
     where: eq(users.id, userId),
+    with: {
+      profile: true,
+    },
   });
 
-  if (!user?.isOnboarded) {
+  if (!user?.profile?.isOnboarded) {
     return "/onboarding";
   }
 
