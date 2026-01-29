@@ -4,6 +4,54 @@ import { createId } from "@paralleldrive/cuid2";
 import { users } from "./user";
 
 // Workspaces
+
+// --- Default Props ---
+const defaultFilters = {
+  priority: null,
+  state: null,
+  state_group: null,
+  assignees: null,
+  created_by: null,
+  labels: null,
+  start_date: null,
+  target_date: null,
+  subscriber: null,
+};
+
+const defaultDisplayFilters = {
+  group_by: null,
+  order_by: "-created_at",
+  type: null,
+  sub_issue: true,
+  show_empty_groups: true,
+  layout: "list",
+  calendar_date_range: "",
+};
+
+const defaultDisplayProperties = {
+  assignee: true,
+  attachment_count: true,
+  created_on: true,
+  due_date: true,
+  estimate: true,
+  key: true,
+  labels: true,
+  link: true,
+  priority: true,
+  start_date: true,
+  state: true,
+  sub_issue_count: true,
+  updated_on: true,
+};
+
+const defaultProductTour = {
+  work_items: false,
+  cycles: false,
+  modules: false,
+  intake: false,
+  pages: false,
+};
+
 export const workspaces = sqliteTable(
   "workspaces",
   {
@@ -120,8 +168,13 @@ export const favorites = sqliteTable(
     userId: text("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    entityType: text("entity_type").notNull(), // project, cycle, module, view, page
-    entityId: text("entity_id").notNull(),
+    projectId: text("project_id"),
+    entityType: text("entity_type").notNull(), // project, cycle, module, view, page, folder
+    entityId: text("entity_id"),
+    name: text("name"),
+    isFolder: integer("is_folder", { mode: "boolean" }).default(false),
+    sequence: real("sequence").default(65535),
+    parentId: text("parent_id"),
     sortOrder: real("sort_order").default(65535),
     createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
   },
@@ -191,8 +244,13 @@ export const stickies = sqliteTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     name: text("name"),
-    description: text("description"),
-    color: text("color").default("#FEF3C7"),
+    description: text("description", { mode: "json" }),
+    descriptionHtml: text("description_html").default("<p></p>"),
+    descriptionStripped: text("description_stripped"),
+    descriptionBinary: text("description_binary"),
+    logoProps: text("logo_props", { mode: "json" }).$defaultFn(() => ({})),
+    color: text("color"),
+    backgroundColor: text("background_color"),
     sortOrder: real("sort_order").default(65535),
     createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
     updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
@@ -228,6 +286,35 @@ export const workspaceHomePreferences = sqliteTable(
   ]
 );
 
+// Workspace User Properties
+export const workspaceUserProperties = sqliteTable(
+  "workspace_user_properties",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    filters: text("filters", { mode: "json" }).$defaultFn(() => defaultFilters),
+    displayFilters: text("display_filters", { mode: "json" }).$defaultFn(() => defaultDisplayFilters),
+    displayProperties: text("display_properties", { mode: "json" }).$defaultFn(() => defaultDisplayProperties),
+    richFilters: text("rich_filters", { mode: "json" }).$defaultFn(() => ({})),
+    navigationProjectLimit: integer("navigation_project_limit").default(10),
+    navigationControlPreference: text("navigation_control_preference").default("ACCORDION"), // ACCORDION, TABBED
+    productTour: text("product_tour", { mode: "json" }).$defaultFn(() => defaultProductTour),
+    createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+  },
+  (table) => [
+    unique("workspace_user_prop_unique").on(table.workspaceId, table.userId),
+    index("workspace_user_prop_user_workspace_idx").on(table.userId, table.workspaceId),
+  ]
+);
+
 // Relations
 export const workspacesRelations = relations(workspaces, ({ one, many }) => ({
   owner: one(users, {
@@ -241,6 +328,7 @@ export const workspacesRelations = relations(workspaces, ({ one, many }) => ({
   quickLinks: many(quickLinks),
   stickies: many(stickies),
   homePreferences: many(workspaceHomePreferences),
+  userProperties: many(workspaceUserProperties),
 }));
 
 export const workspaceMembersRelations = relations(workspaceMembers, ({ one }) => ({
@@ -316,6 +404,17 @@ export const workspaceHomePreferencesRelations = relations(workspaceHomePreferen
   }),
   user: one(users, {
     fields: [workspaceHomePreferences.userId],
+    references: [users.id],
+  }),
+}));
+
+export const workspaceUserPropertiesRelations = relations(workspaceUserProperties, ({ one }) => ({
+  workspace: one(workspaces, {
+    fields: [workspaceUserProperties.workspaceId],
+    references: [workspaces.id],
+  }),
+  user: one(users, {
+    fields: [workspaceUserProperties.userId],
     references: [users.id],
   }),
 }));

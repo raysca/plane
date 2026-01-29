@@ -9,6 +9,10 @@ import {
   workspaceMembers,
   workspaceInvitations,
   workspaceLabels,
+  quickLinks,
+  recentVisits,
+  stickies,
+  favorites,
 } from "../../db/schema/workspace";
 import { authMiddleware, ROLES } from "../../middleware/auth";
 import {
@@ -22,8 +26,15 @@ import { generateSlug, isValidSlug } from "../../lib/utils";
 import { seedWorkspace } from "../../lib/workspace-seeder";
 import { userProfiles } from "../../db/schema/user";
 import { notifications } from "../../db/schema/notification";
-import { sql, not, like, isNull } from "drizzle-orm";
+import { issues, issueAssignees } from "../../db/schema/issue";
+import { projects, projectMembers } from "../../db/schema/project";
+import { pages } from "../../db/schema/page";
+import { cycles } from "../../db/schema/cycle";
+import { modules } from "../../db/schema/module";
+import { views } from "../../db/schema/view";
+import { sql, not, like, isNull, count, lt, max } from "drizzle-orm";
 import homePreferenceRoutes from "./home-preference";
+import userPropertiesRoutes from "./user-properties";
 
 const workspaceRoutes = new Hono<{ Variables: Variables }>();
 
@@ -1048,6 +1059,141 @@ workspaceRoutes.patch("/:slug/sidebar-preferences/", async (c) => {
 // Home Preferences
 workspaceRoutes.route("/:slug/home-preferences/", homePreferenceRoutes);
 
+// User Properties
+workspaceRoutes.route("/:slug/user-properties/", userPropertiesRoutes);
+
+
+// Recent Visits
+// GET /api/workspaces/:slug/recent-visits/ - List recent visits with entity data
+workspaceRoutes.get("/:slug/recent-visits/", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.json({ detail: "Authentication required." }, 401);
+
+  const workspace = c.get("workspace");
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  const entityNameParam = c.req.query("entity_name");
+
+  // Build query conditions
+  const conditions = [
+    eq(recentVisits.workspaceId, workspace.id),
+    eq(recentVisits.userId, user.id),
+  ];
+
+  // Filter by entity_name if provided, otherwise default to issue/page/project
+  const allowedEntities = ["issue", "page", "project"];
+  if (entityNameParam && allowedEntities.includes(entityNameParam)) {
+    conditions.push(eq(recentVisits.entityType, entityNameParam));
+  } else {
+    conditions.push(inArray(recentVisits.entityType, allowedEntities));
+  }
+
+  const visits = await db
+    .select()
+    .from(recentVisits)
+    .where(and(...conditions))
+    .orderBy(desc(recentVisits.visitedAt))
+    .limit(20);
+
+  // Fetch entity data for each visit
+  const results = await Promise.all(
+    visits.map(async (visit) => {
+      let entityData: Record<string, unknown> | null = null;
+
+      try {
+        if (visit.entityType === "issue") {
+          const issue = await db.query.issues.findFirst({
+            where: eq(issues.id, visit.entityId),
+          });
+          if (issue) {
+            // Get project identifier
+            const project = await db.query.projects.findFirst({
+              where: eq(projects.id, issue.projectId),
+            });
+            // Get assignees (non-deleted)
+            const assignees = await db
+              .select({ assigneeId: issueAssignees.assigneeId })
+              .from(issueAssignees)
+              .where(eq(issueAssignees.issueId, issue.id));
+
+            entityData = {
+              id: issue.id,
+              name: issue.name,
+              state: issue.stateId,
+              priority: issue.priority,
+              assignees: assignees.map((a) => a.assigneeId),
+              type: issue.isEpic ? "epic" : null,
+              sequence_id: issue.sequenceId,
+              project_id: issue.projectId,
+              project_identifier: project?.identifier ?? null,
+              is_epic: issue.isEpic ?? false,
+            };
+          }
+        } else if (visit.entityType === "project") {
+          const project = await db.query.projects.findFirst({
+            where: eq(projects.id, visit.entityId),
+          });
+          if (project) {
+            // Get active project members
+            const members = await db
+              .select({ memberId: projectMembers.memberId })
+              .from(projectMembers)
+              .where(
+                and(
+                  eq(projectMembers.projectId, project.id),
+                  eq(projectMembers.isActive, true)
+                )
+              );
+
+            entityData = {
+              id: project.id,
+              name: project.name,
+              logo_props: project.iconProp ?? {},
+              project_members: members.map((m) => m.memberId),
+              identifier: project.identifier,
+            };
+          }
+        } else if (visit.entityType === "page") {
+          const page = await db.query.pages.findFirst({
+            where: eq(pages.id, visit.entityId),
+          });
+          if (page) {
+            // Get project identifier if page belongs to a project
+            let projectIdentifier: string | null = null;
+            if (page.projectId) {
+              const project = await db.query.projects.findFirst({
+                where: eq(projects.id, page.projectId),
+              });
+              projectIdentifier = project?.identifier ?? null;
+            }
+
+            entityData = {
+              id: page.id,
+              name: page.name,
+              logo_props: page.iconProp ? JSON.parse(page.iconProp as string) : {},
+              project_id: page.projectId ?? null,
+              owned_by: page.ownedById,
+              project_identifier: projectIdentifier,
+            };
+          }
+        }
+      } catch {
+        entityData = null;
+      }
+
+      return {
+        id: visit.id,
+        entity_name: visit.entityType,
+        entity_identifier: visit.entityId,
+        entity_data: entityData,
+        visited_at: visit.visitedAt?.toISOString() ?? null,
+      };
+    })
+  );
+
+  return c.json(results);
+});
+
 // =====================================================
 // Placeholder routes (later phases)
 // =====================================================
@@ -1182,46 +1328,815 @@ workspaceRoutes.get("/:slug/users/notifications/unread/", async (c) => {
 });
 
 // Favorites
+
+// Validation schemas for favorites
+const createFavoriteSchema = z.object({
+  entity_type: z.string().min(1),
+  entity_identifier: z.string().optional().nullable(),
+  name: z.string().max(255).optional().nullable(),
+  is_folder: z.boolean().optional(),
+  parent: z.string().optional().nullable(),
+  project_id: z.string().optional().nullable(),
+  sequence: z.number().optional(),
+});
+
+const updateFavoriteSchema = z.object({
+  name: z.string().max(255).optional().nullable(),
+  parent: z.string().optional().nullable(),
+  sequence: z.number().optional(),
+  is_folder: z.boolean().optional(),
+  sort_order: z.number().optional(),
+});
+
+// Helper to fetch entity data for a favorite
+async function fetchFavoriteEntityData(
+  entityType: string,
+  entityId: string | null
+): Promise<Record<string, unknown> | null> {
+  if (!entityId) return null;
+
+  try {
+    if (entityType === "project") {
+      const project = await db.query.projects.findFirst({
+        where: eq(projects.id, entityId),
+      });
+      if (!project) return null;
+      return {
+        id: project.id,
+        name: project.name,
+        logo_props: project.iconProp ?? {},
+      };
+    } else if (entityType === "cycle") {
+      const cycle = await db.query.cycles.findFirst({
+        where: eq(cycles.id, entityId),
+      });
+      if (!cycle) return null;
+      return {
+        id: cycle.id,
+        name: cycle.name,
+        logo_props: {},
+        project_id: cycle.projectId,
+      };
+    } else if (entityType === "module") {
+      const mod = await db.query.modules.findFirst({
+        where: eq(modules.id, entityId),
+      });
+      if (!mod) return null;
+      return {
+        id: mod.id,
+        name: mod.name,
+        logo_props: {},
+        project_id: mod.projectId,
+      };
+    } else if (entityType === "view") {
+      const view = await db.query.views.findFirst({
+        where: eq(views.id, entityId),
+      });
+      if (!view) return null;
+      return {
+        id: view.id,
+        name: view.name,
+        logo_props: {},
+        project_id: view.projectId,
+      };
+    } else if (entityType === "page") {
+      const page = await db.query.pages.findFirst({
+        where: eq(pages.id, entityId),
+      });
+      if (!page) return null;
+      return {
+        id: page.id,
+        name: page.name,
+        logo_props: page.iconProp ? JSON.parse(page.iconProp as string) : {},
+        project_id: page.projectId ?? null,
+      };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+// Helper to format favorite for API response
+async function formatFavoriteResponse(fav: typeof favorites.$inferSelect) {
+  const entityData = await fetchFavoriteEntityData(
+    fav.entityType,
+    fav.entityId
+  );
+
+  return {
+    id: fav.id,
+    entity_type: fav.entityType,
+    entity_identifier: fav.entityId ?? null,
+    entity_data: entityData,
+    name: fav.name ?? "",
+    is_folder: fav.isFolder ?? false,
+    sequence: fav.sequence ?? 65535,
+    parent: fav.parentId ?? null,
+    workspace_id: fav.workspaceId,
+    project_id: fav.projectId ?? null,
+  };
+}
+
+// GET /api/workspaces/:slug/user-favorites/ - List user's favorites (top-level only)
 workspaceRoutes.get("/:slug/user-favorites/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
+  const user = c.get("user");
+  if (!user) return c.json({ detail: "Authentication required." }, 401);
+
+  const workspace = c.get("workspace");
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  // Fetch top-level favorites (no parent) for the current user
+  const userFavorites = await db
+    .select()
+    .from(favorites)
+    .where(
+      and(
+        eq(favorites.userId, user.id),
+        eq(favorites.workspaceId, workspace.id),
+        isNull(favorites.parentId)
+      )
+    )
+    .orderBy(desc(favorites.createdAt));
+
+  const results = await Promise.all(
+    userFavorites.map((fav) => formatFavoriteResponse(fav))
+  );
+
+  return c.json(results);
 });
 
-workspaceRoutes.post("/:slug/user-favorites/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
-});
+// POST /api/workspaces/:slug/user-favorites/ - Create a favorite
+workspaceRoutes.post(
+  "/:slug/user-favorites/",
+  zValidator("json", createFavoriteSchema),
+  async (c) => {
+    const user = c.get("user");
+    if (!user) return c.json({ detail: "Authentication required." }, 401);
 
+    const workspace = c.get("workspace");
+    if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+    const body = c.req.valid("json");
+
+    // If entity_identifier is provided, check if it already exists
+    if (body.entity_identifier) {
+      const existing = await db.query.favorites.findFirst({
+        where: and(
+          eq(favorites.workspaceId, workspace.id),
+          eq(favorites.userId, user.id),
+          eq(favorites.entityType, body.entity_type),
+          eq(favorites.entityId, body.entity_identifier)
+        ),
+      });
+
+      if (existing) {
+        const result = await formatFavoriteResponse(existing);
+        return c.json(result);
+      }
+    }
+
+    // Calculate sequence: max sequence in workspace + 10000
+    const maxSeqResult = await db
+      .select({ maxSeq: max(favorites.sequence) })
+      .from(favorites)
+      .where(eq(favorites.workspaceId, workspace.id));
+    const maxSeq = maxSeqResult[0]?.maxSeq ?? 65535;
+    const newSequence = body.sequence ?? (typeof maxSeq === "number" ? maxSeq + 10000 : 75535);
+
+    const result = await db
+      .insert(favorites)
+      .values({
+        workspaceId: workspace.id,
+        userId: user.id,
+        projectId: body.project_id ?? null,
+        entityType: body.entity_type,
+        entityId: body.entity_identifier ?? null,
+        name: body.name ?? null,
+        isFolder: body.is_folder ?? false,
+        sequence: newSequence,
+        parentId: body.parent ?? null,
+      })
+      .returning();
+
+    const formatted = await formatFavoriteResponse(result[0]!);
+    return c.json(formatted);
+  }
+);
+
+// PATCH /api/workspaces/:slug/user-favorites/:id/ - Update a favorite
+workspaceRoutes.patch(
+  "/:slug/user-favorites/:id/",
+  zValidator("json", updateFavoriteSchema),
+  async (c) => {
+    const user = c.get("user");
+    if (!user) return c.json({ detail: "Authentication required." }, 401);
+
+    const workspace = c.get("workspace");
+    if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+    const favoriteId = c.req.param("id");
+    const body = c.req.valid("json");
+
+    const existing = await db.query.favorites.findFirst({
+      where: and(
+        eq(favorites.id, favoriteId),
+        eq(favorites.userId, user.id),
+        eq(favorites.workspaceId, workspace.id)
+      ),
+    });
+
+    if (!existing) return c.json({ detail: "Favorite not found." }, 404);
+
+    const updateData: Record<string, unknown> = {};
+    if (body.name !== undefined) updateData.name = body.name;
+    if (body.parent !== undefined) updateData.parentId = body.parent;
+    if (body.sequence !== undefined) updateData.sequence = body.sequence;
+    if (body.is_folder !== undefined) updateData.isFolder = body.is_folder;
+    if (body.sort_order !== undefined) updateData.sortOrder = body.sort_order;
+
+    if (Object.keys(updateData).length > 0) {
+      await db
+        .update(favorites)
+        .set(updateData)
+        .where(eq(favorites.id, favoriteId));
+    }
+
+    const updated = await db.query.favorites.findFirst({
+      where: eq(favorites.id, favoriteId),
+    });
+
+    const formatted = await formatFavoriteResponse(updated!);
+    return c.json(formatted);
+  }
+);
+
+// DELETE /api/workspaces/:slug/user-favorites/:id/ - Delete a favorite
 workspaceRoutes.delete("/:slug/user-favorites/:id/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
+  const user = c.get("user");
+  if (!user) return c.json({ detail: "Authentication required." }, 401);
+
+  const workspace = c.get("workspace");
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  const favoriteId = c.req.param("id");
+
+  const existing = await db.query.favorites.findFirst({
+    where: and(
+      eq(favorites.id, favoriteId),
+      eq(favorites.userId, user.id),
+      eq(favorites.workspaceId, workspace.id)
+    ),
+  });
+
+  if (!existing) return c.json({ detail: "Favorite not found." }, 404);
+
+  // Delete the favorite and its children (if it's a folder)
+  await db.delete(favorites).where(eq(favorites.parentId, favoriteId));
+  await db.delete(favorites).where(eq(favorites.id, favoriteId));
+
+  return new Response(null, { status: 204 });
+});
+
+// GET /api/workspaces/:slug/user-favorites/:id/group/ - Get favorites in a folder
+workspaceRoutes.get("/:slug/user-favorites/:id/group/", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.json({ detail: "Authentication required." }, 401);
+
+  const workspace = c.get("workspace");
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  const favoriteId = c.req.param("id");
+
+  const children = await db
+    .select()
+    .from(favorites)
+    .where(
+      and(
+        eq(favorites.userId, user.id),
+        eq(favorites.workspaceId, workspace.id),
+        eq(favorites.parentId, favoriteId)
+      )
+    )
+    .orderBy(desc(favorites.createdAt));
+
+  const results = await Promise.all(
+    children.map((fav) => formatFavoriteResponse(fav))
+  );
+
+  return c.json(results);
 });
 
 // Quick links
+
+// Validation schemas for quick links
+const createQuickLinkSchema = z.object({
+  title: z.string().max(255).optional().nullable(),
+  url: z.string().min(1),
+  metadata: z.any().optional(),
+});
+
+const updateQuickLinkSchema = z.object({
+  title: z.string().max(255).optional().nullable(),
+  url: z.string().min(1).optional(),
+  metadata: z.any().optional(),
+});
+
+// Helper to normalize URL (auto-prefix http:// if no protocol)
+function normalizeUrl(url: string): string {
+  if (url && !url.startsWith("http://") && !url.startsWith("https://")) {
+    return "http://" + url;
+  }
+  return url;
+}
+
+// Helper to validate URL format
+function isValidUrl(url: string): boolean {
+  try {
+    new URL(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Helper to format quick link for API response (matching Django's serializer output)
+function formatQuickLinkResponse(
+  link: typeof quickLinks.$inferSelect,
+  workspaceSlug: string
+) {
+  return {
+    id: link.id,
+    title: link.name ?? "",
+    url: link.url,
+    metadata: link.description ? { description: link.description } : {},
+    created_by_id: link.userId,
+    workspace_slug: workspaceSlug,
+    created_at: link.createdAt?.toISOString() ?? null,
+    sort_order: link.sortOrder ?? 65535,
+  };
+}
+
+// GET /api/workspaces/:slug/quick-links/ - List quick links for current user
 workspaceRoutes.get("/:slug/quick-links/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
+  const user = c.get("user");
+  if (!user) return c.json({ detail: "Authentication required." }, 401);
+
+  const workspace = c.get("workspace");
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  const links = await db
+    .select()
+    .from(quickLinks)
+    .where(
+      and(
+        eq(quickLinks.workspaceId, workspace.id),
+        eq(quickLinks.userId, user.id)
+      )
+    )
+    .orderBy(desc(quickLinks.createdAt));
+
+  return c.json(links.map((link) => formatQuickLinkResponse(link, workspace.slug)));
 });
 
-workspaceRoutes.post("/:slug/quick-links/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
+// POST /api/workspaces/:slug/quick-links/ - Create a quick link
+workspaceRoutes.post(
+  "/:slug/quick-links/",
+  zValidator("json", createQuickLinkSchema),
+  async (c) => {
+    const user = c.get("user");
+    if (!user) return c.json({ detail: "Authentication required." }, 401);
+
+    const workspace = c.get("workspace");
+    if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+    const body = c.req.valid("json");
+
+    // Normalize URL
+    const url = normalizeUrl(body.url);
+
+    // Validate URL format
+    if (!isValidUrl(url)) {
+      return c.json({ url: ["Invalid URL format."] }, 400);
+    }
+
+    // Check for duplicate URL for the same user and workspace
+    const existing = await db.query.quickLinks.findFirst({
+      where: and(
+        eq(quickLinks.url, url),
+        eq(quickLinks.workspaceId, workspace.id),
+        eq(quickLinks.userId, user.id)
+      ),
+    });
+
+    if (existing) {
+      return c.json(
+        { error: "URL already exists for this workspace and owner" },
+        400
+      );
+    }
+
+    const result = await db
+      .insert(quickLinks)
+      .values({
+        workspaceId: workspace.id,
+        userId: user.id,
+        name: body.title ?? "",
+        url,
+        description: body.metadata
+          ? JSON.stringify(body.metadata)
+          : null,
+      })
+      .returning();
+
+    return c.json(
+      formatQuickLinkResponse(result[0]!, workspace.slug),
+      201
+    );
+  }
+);
+
+// GET /api/workspaces/:slug/quick-links/:id/ - Retrieve a specific quick link
+workspaceRoutes.get("/:slug/quick-links/:id/", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.json({ detail: "Authentication required." }, 401);
+
+  const workspace = c.get("workspace");
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  const linkId = c.req.param("id");
+
+  const link = await db.query.quickLinks.findFirst({
+    where: and(
+      eq(quickLinks.id, linkId),
+      eq(quickLinks.workspaceId, workspace.id),
+      eq(quickLinks.userId, user.id)
+    ),
+  });
+
+  if (!link) {
+    return c.json({ error: "Quick link not found." }, 404);
+  }
+
+  return c.json(formatQuickLinkResponse(link, workspace.slug));
 });
 
+// PATCH /api/workspaces/:slug/quick-links/:id/ - Update a quick link
+workspaceRoutes.patch(
+  "/:slug/quick-links/:id/",
+  zValidator("json", updateQuickLinkSchema),
+  async (c) => {
+    const user = c.get("user");
+    if (!user) return c.json({ detail: "Authentication required." }, 401);
+
+    const workspace = c.get("workspace");
+    if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+    const linkId = c.req.param("id");
+    const body = c.req.valid("json");
+
+    // Find the existing link (must belong to current user)
+    const existing = await db.query.quickLinks.findFirst({
+      where: and(
+        eq(quickLinks.id, linkId),
+        eq(quickLinks.workspaceId, workspace.id),
+        eq(quickLinks.userId, user.id)
+      ),
+    });
+
+    if (!existing) {
+      return c.json({ detail: "Quick link not found." }, 404);
+    }
+
+    // If URL is being updated, normalize and validate
+    let url = body.url;
+    if (url !== undefined) {
+      url = normalizeUrl(url);
+      if (!isValidUrl(url)) {
+        return c.json({ url: ["Invalid URL format."] }, 400);
+      }
+
+      // Check for duplicate URL (excluding current link)
+      const duplicate = await db.query.quickLinks.findFirst({
+        where: and(
+          eq(quickLinks.url, url),
+          eq(quickLinks.workspaceId, workspace.id),
+          eq(quickLinks.userId, user.id),
+          not(eq(quickLinks.id, linkId))
+        ),
+      });
+
+      if (duplicate) {
+        return c.json(
+          { error: "URL already exists for this workspace and owner" },
+          400
+        );
+      }
+    }
+
+    const updateData: Record<string, unknown> = {};
+    if (body.title !== undefined) updateData.name = body.title ?? "";
+    if (url !== undefined) updateData.url = url;
+    if (body.metadata !== undefined) {
+      updateData.description = body.metadata
+        ? JSON.stringify(body.metadata)
+        : null;
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return c.json(formatQuickLinkResponse(existing, workspace.slug));
+    }
+
+    await db
+      .update(quickLinks)
+      .set(updateData)
+      .where(eq(quickLinks.id, linkId));
+
+    const updated = await db.query.quickLinks.findFirst({
+      where: eq(quickLinks.id, linkId),
+    });
+
+    return c.json(formatQuickLinkResponse(updated!, workspace.slug));
+  }
+);
+
+// DELETE /api/workspaces/:slug/quick-links/:id/ - Delete a quick link
 workspaceRoutes.delete("/:slug/quick-links/:id/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
+  const user = c.get("user");
+  if (!user) return c.json({ detail: "Authentication required." }, 401);
+
+  const workspace = c.get("workspace");
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  const linkId = c.req.param("id");
+
+  const link = await db.query.quickLinks.findFirst({
+    where: and(
+      eq(quickLinks.id, linkId),
+      eq(quickLinks.workspaceId, workspace.id),
+      eq(quickLinks.userId, user.id)
+    ),
+  });
+
+  if (!link) {
+    return c.json({ detail: "Quick link not found." }, 404);
+  }
+
+  await db.delete(quickLinks).where(eq(quickLinks.id, linkId));
+
+  return new Response(null, { status: 204 });
 });
 
 // Stickies
+
+// Validation schemas
+const createStickySchema = z.object({
+  name: z.string().optional().nullable(),
+  description: z.any().optional(),
+  description_html: z.string().optional(),
+  description_binary: z.string().optional().nullable(),
+  logo_props: z.any().optional(),
+  color: z.string().max(255).optional().nullable(),
+  background_color: z.string().max(255).optional().nullable(),
+  sort_order: z.number().optional(),
+});
+
+const updateStickySchema = createStickySchema;
+
+// Helper to format sticky for API response
+function formatStickyResponse(sticky: typeof stickies.$inferSelect) {
+  return {
+    id: sticky.id,
+    name: sticky.name ?? "",
+    description: sticky.description ?? {},
+    description_html: sticky.descriptionHtml ?? "<p></p>",
+    description_stripped: sticky.descriptionStripped ?? "",
+    description_binary: sticky.descriptionBinary ?? null,
+    logo_props: sticky.logoProps ?? {},
+    color: sticky.color ?? null,
+    background_color: sticky.backgroundColor ?? null,
+    sort_order: sticky.sortOrder ?? 65535,
+    workspace: sticky.workspaceId,
+    created_by: sticky.userId,
+    updated_by: sticky.userId,
+    created_at: sticky.createdAt?.toISOString() ?? null,
+    updated_at: sticky.updatedAt?.toISOString() ?? null,
+  };
+}
+
+// GET /api/workspaces/:slug/stickies/ - List stickies with cursor-based pagination
 workspaceRoutes.get("/:slug/stickies/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
+  const user = c.get("user");
+  if (!user) return c.json({ detail: "Authentication required." }, 401);
+
+  const workspace = c.get("workspace");
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  const query = c.req.query("query");
+  const perPageParam = c.req.query("per_page");
+  const cursor = c.req.query("cursor");
+  const perPage = Math.min(Math.max(parseInt(perPageParam || "20", 10) || 20, 1), 100);
+
+  // Base conditions: user's stickies in this workspace
+  const conditions: ReturnType<typeof eq>[] = [
+    eq(stickies.workspaceId, workspace.id),
+    eq(stickies.userId, user.id),
+  ];
+
+  // Search filter
+  if (query) {
+    conditions.push(like(stickies.descriptionStripped, `%${query}%`));
+  }
+
+  // Cursor-based pagination: cursor is the sort_order value to paginate from
+  if (cursor) {
+    const cursorValue = parseFloat(cursor);
+    if (!isNaN(cursorValue)) {
+      conditions.push(lt(stickies.sortOrder, cursorValue));
+    }
+  }
+
+  // Get total count (without cursor filter for accurate total)
+  const baseConditions: ReturnType<typeof eq>[] = [
+    eq(stickies.workspaceId, workspace.id),
+    eq(stickies.userId, user.id),
+  ];
+  if (query) {
+    baseConditions.push(like(stickies.descriptionStripped, `%${query}%`));
+  }
+
+  const totalResult = await db
+    .select({ total: count() })
+    .from(stickies)
+    .where(and(...baseConditions));
+  const totalCount = Number(totalResult[0]?.total ?? 0);
+
+  // Fetch page + 1 to determine if there's a next page
+  const results = await db
+    .select()
+    .from(stickies)
+    .where(and(...conditions))
+    .orderBy(desc(stickies.sortOrder))
+    .limit(perPage + 1);
+
+  const hasNext = results.length > perPage;
+  const pageResults = results.slice(0, perPage);
+  const nextCursor = hasNext && pageResults.length > 0
+    ? String(pageResults[pageResults.length - 1]!.sortOrder)
+    : null;
+
+  // Return paginated response matching Django's paginate() format
+  return c.json({
+    next_cursor: nextCursor,
+    prev_cursor: cursor ?? null,
+    next_page_results: hasNext,
+    prev_page_results: !!cursor,
+    total_pages: Math.ceil(totalCount / perPage),
+    total_count: totalCount,
+    results: pageResults.map(formatStickyResponse),
+  });
 });
 
-workspaceRoutes.post("/:slug/stickies/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
+// POST /api/workspaces/:slug/stickies/ - Create a sticky
+workspaceRoutes.post(
+  "/:slug/stickies/",
+  zValidator("json", createStickySchema),
+  async (c) => {
+    const user = c.get("user");
+    if (!user) return c.json({ detail: "Authentication required." }, 401);
+
+    const workspace = c.get("workspace");
+    if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+    const body = c.req.valid("json");
+
+    const result = await db
+      .insert(stickies)
+      .values({
+        workspaceId: workspace.id,
+        userId: user.id,
+        name: body.name ?? null,
+        description: body.description ?? {},
+        descriptionHtml: body.description_html ?? "<p></p>",
+        descriptionStripped: typeof body.description_html === "string"
+          ? body.description_html.replace(/<[^>]*>/g, "").trim()
+          : null,
+        descriptionBinary: body.description_binary ?? null,
+        logoProps: body.logo_props ?? {},
+        color: body.color ?? null,
+        backgroundColor: body.background_color ?? null,
+        sortOrder: body.sort_order ?? 65535,
+      })
+      .returning();
+
+    return c.json(formatStickyResponse(result[0]!), 201);
+  }
+);
+
+// GET /api/workspaces/:slug/stickies/:id/ - Retrieve a sticky
+workspaceRoutes.get("/:slug/stickies/:id/", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.json({ detail: "Authentication required." }, 401);
+
+  const workspace = c.get("workspace");
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  const stickyId = c.req.param("id");
+
+  const sticky = await db.query.stickies.findFirst({
+    where: and(
+      eq(stickies.id, stickyId),
+      eq(stickies.workspaceId, workspace.id),
+      eq(stickies.userId, user.id)
+    ),
+  });
+
+  if (!sticky) return c.json({ detail: "Sticky not found." }, 404);
+
+  return c.json(formatStickyResponse(sticky));
 });
 
-workspaceRoutes.patch("/:slug/stickies/:id/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
-});
+// PATCH /api/workspaces/:slug/stickies/:id/ - Update a sticky (owner only)
+workspaceRoutes.patch(
+  "/:slug/stickies/:id/",
+  zValidator("json", updateStickySchema),
+  async (c) => {
+    const user = c.get("user");
+    if (!user) return c.json({ detail: "Authentication required." }, 401);
 
+    const workspace = c.get("workspace");
+    if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+    const stickyId = c.req.param("id");
+    const body = c.req.valid("json");
+
+    // Only the owner can update their sticky
+    const existing = await db.query.stickies.findFirst({
+      where: and(
+        eq(stickies.id, stickyId),
+        eq(stickies.workspaceId, workspace.id),
+        eq(stickies.userId, user.id)
+      ),
+    });
+
+    if (!existing) return c.json({ detail: "Sticky not found." }, 404);
+
+    const updateData: Record<string, unknown> = {
+      updatedAt: new Date(),
+    };
+
+    if (body.name !== undefined) updateData.name = body.name;
+    if (body.description !== undefined) updateData.description = body.description;
+    if (body.description_html !== undefined) {
+      updateData.descriptionHtml = body.description_html;
+      updateData.descriptionStripped = body.description_html
+        .replace(/<[^>]*>/g, "")
+        .trim();
+    }
+    if (body.description_binary !== undefined) updateData.descriptionBinary = body.description_binary;
+    if (body.logo_props !== undefined) updateData.logoProps = body.logo_props;
+    if (body.color !== undefined) updateData.color = body.color;
+    if (body.background_color !== undefined) updateData.backgroundColor = body.background_color;
+    if (body.sort_order !== undefined) updateData.sortOrder = body.sort_order;
+
+    await db
+      .update(stickies)
+      .set(updateData)
+      .where(eq(stickies.id, stickyId));
+
+    const updated = await db.query.stickies.findFirst({
+      where: eq(stickies.id, stickyId),
+    });
+
+    return c.json(formatStickyResponse(updated!));
+  }
+);
+
+// DELETE /api/workspaces/:slug/stickies/:id/ - Delete a sticky (owner only)
 workspaceRoutes.delete("/:slug/stickies/:id/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
+  const user = c.get("user");
+  if (!user) return c.json({ detail: "Authentication required." }, 401);
+
+  const workspace = c.get("workspace");
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  const stickyId = c.req.param("id");
+
+  // Only the owner can delete their sticky
+  const sticky = await db.query.stickies.findFirst({
+    where: and(
+      eq(stickies.id, stickyId),
+      eq(stickies.workspaceId, workspace.id),
+      eq(stickies.userId, user.id)
+    ),
+  });
+
+  if (!sticky) return c.json({ detail: "Sticky not found." }, 404);
+
+  await db.delete(stickies).where(eq(stickies.id, stickyId));
+
+  return new Response(null, { status: 204 });
 });
 
 // Dashboard
