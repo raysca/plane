@@ -392,6 +392,7 @@ beforeAll(async () => {
       logo TEXT,
       owner_id TEXT NOT NULL REFERENCES users(id),
       organization_size TEXT,
+      timezone TEXT DEFAULT 'UTC',
       created_at INTEGER,
       updated_at INTEGER
     );

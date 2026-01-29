@@ -222,11 +222,50 @@ function buildTestApp() {
     return c.json(formatProfileResponse(profile!));
   });
 
-  // GET /api/users/me/settings/ - Get settings
+  // GET /api/users/me/settings/ - Get settings (matching Django's UserMeSettingsSerializer)
   app.get("/api/users/me/settings/", async (c) => {
     const contextUser = c.get("user") as any;
+    const user = await testDb.query.users.findFirst({
+      where: eq(users.id, contextUser.id),
+    });
     const profile = await getOrCreateProfile(contextUser.id);
-    return c.json(formatProfileResponse(profile));
+
+    // Count pending invitations
+    const invitations = await testDb.select()
+      .from(workspaceInvitations)
+      .where(eq(workspaceInvitations.email, user!.email));
+    const inviteCount = invitations.length;
+
+    // Get last workspace info
+    let lastWorkspace = null;
+    if (profile.lastWorkspaceId) {
+      const membership = await testDb.query.workspaceMembers.findFirst({
+        where: and(
+          eq(workspaceMembers.workspaceId, profile.lastWorkspaceId),
+          eq(workspaceMembers.userId, contextUser.id),
+          eq(workspaceMembers.isActive, true)
+        ),
+      });
+      if (membership) {
+        lastWorkspace = await testDb.query.workspaces.findFirst({
+          where: eq(workspaces.id, profile.lastWorkspaceId),
+        });
+      }
+    }
+
+    return c.json({
+      id: user!.id,
+      email: user!.email,
+      workspace: {
+        last_workspace_id: lastWorkspace?.id ?? null,
+        last_workspace_slug: lastWorkspace?.slug ?? null,
+        last_workspace_name: lastWorkspace?.name ?? null,
+        last_workspace_logo: lastWorkspace?.logo ?? null,
+        fallback_workspace_id: lastWorkspace?.id ?? null,
+        fallback_workspace_slug: lastWorkspace?.slug ?? null,
+        invites: inviteCount,
+      },
+    });
   });
 
   // PATCH /api/users/me/onboard/ - Mark onboarded
@@ -389,6 +428,7 @@ beforeAll(async () => {
       logo TEXT,
       owner_id TEXT NOT NULL REFERENCES users(id),
       organization_size TEXT,
+      timezone TEXT DEFAULT 'UTC',
       created_at INTEGER,
       updated_at INTEGER
     );
@@ -638,16 +678,19 @@ describe("GET /api/users/me/profile/ - Profile response includes onboarding fiel
   });
 });
 
-describe("GET /api/users/me/settings/ - Settings response includes onboarding fields", () => {
-  test("returns full settings with onboarding data", async () => {
+describe("GET /api/users/me/settings/ - Settings response matches IUserSettings", () => {
+  test("returns workspace info with last_workspace and invites", async () => {
     const res = await jsonRequest(app, "GET", "/api/users/me/settings/");
     expect(res.status).toBe(200);
     const data = await res.json() as any;
-    expect(data).toHaveProperty("onboarding_step");
-    expect(data).toHaveProperty("is_onboarded");
-    expect(data).toHaveProperty("role");
-    expect(data).toHaveProperty("use_case");
-    expect(data).toHaveProperty("last_workspace_id");
+    expect(data).toHaveProperty("id");
+    expect(data).toHaveProperty("email");
+    expect(data).toHaveProperty("workspace");
+    expect(data.workspace).toHaveProperty("last_workspace_id");
+    expect(data.workspace).toHaveProperty("last_workspace_slug");
+    expect(data.workspace).toHaveProperty("fallback_workspace_id");
+    expect(data.workspace).toHaveProperty("fallback_workspace_slug");
+    expect(data.workspace).toHaveProperty("invites");
   });
 });
 
@@ -750,11 +793,13 @@ describe("Full onboarding flow end-to-end", () => {
     expect(step.workspace_invite).toBe(true);
     expect(step.workspace_join).toBe(true);
 
-    // Settings should reflect onboarded state
+    // Settings should reflect workspace info
     res = await jsonRequest(app, "GET", "/api/users/me/settings/", undefined, flowUser.id);
     expect(res.status).toBe(200);
     const settings = await res.json() as any;
-    expect(settings.is_onboarded).toBe(true);
-    expect(settings.role).toBe("developer");
+    expect(settings.id).toBe(flowUser.id);
+    expect(settings.workspace).toBeDefined();
+    expect(settings.workspace.last_workspace_id).toBe(ws.id);
+    expect(settings.workspace.last_workspace_slug).toBe("flow-ws");
   });
 });

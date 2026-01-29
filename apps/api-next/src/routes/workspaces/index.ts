@@ -35,12 +35,14 @@ const createWorkspaceSchema = z.object({
   slug: z.string().min(3).max(48).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).optional(),
   organization_size: z.string().max(20).optional(),
   logo: z.string().url().optional().nullable(),
+  timezone: z.string().max(255).optional(),
 });
 
 const updateWorkspaceSchema = z.object({
   name: z.string().min(1).max(80).optional(),
   logo: z.string().url().optional().nullable(),
   organization_size: z.string().max(20).optional(),
+  timezone: z.string().max(255).optional(),
 });
 
 const addMemberSchema = z.object({
@@ -93,10 +95,15 @@ function formatWorkspace(ws: typeof workspaces.$inferSelect) {
     name: ws.name,
     slug: ws.slug,
     logo: ws.logo ?? "",
-    owner_id: ws.ownerId,
+    logo_url: ws.logo ?? null,
+    owner: ws.ownerId,
     organization_size: ws.organizationSize ?? "",
+    timezone: ws.timezone ?? "UTC",
+    url: `/${ws.slug}/`,
     created_at: ws.createdAt?.toISOString() ?? null,
     updated_at: ws.updatedAt?.toISOString() ?? null,
+    created_by: null,
+    updated_by: null,
   };
 }
 
@@ -166,7 +173,10 @@ workspaceRoutes.get("/", async (c) => {
     })
     .from(workspaceMembers)
     .innerJoin(workspaces, eq(workspaceMembers.workspaceId, workspaces.id))
-    .where(eq(workspaceMembers.userId, user.id));
+    .where(and(
+      eq(workspaceMembers.userId, user.id),
+      eq(workspaceMembers.isActive, true)
+    ));
 
   const results = memberships.map((m) => ({
     ...formatWorkspace(m.workspace),
@@ -213,6 +223,7 @@ workspaceRoutes.post("/", zValidator("json", createWorkspaceSchema), async (c) =
     ownerId: user.id,
     organizationSize: body.organization_size,
     logo: body.logo,
+    timezone: body.timezone,
   }).returning();
 
   const workspace = result[0];
@@ -383,6 +394,7 @@ workspaceRoutes.patch("/:slug/", requireWorkspaceAdmin, zValidator("json", updat
     ...(body.name !== undefined && { name: body.name }),
     ...(body.logo !== undefined && { logo: body.logo }),
     ...(body.organization_size !== undefined && { organizationSize: body.organization_size }),
+    ...(body.timezone !== undefined && { timezone: body.timezone }),
     updatedAt: new Date(),
   };
 

@@ -35,13 +35,6 @@ const forgotPasswordSchema = z.object({
   email: z.email(),
 });
 
-const setPasswordSchema = z.object({
-  password: z.string().min(8).max(128),
-  confirm_password: z.string().min(8).max(128),
-  token: z.string().optional(),
-  uid: z.string().optional(),
-});
-
 const emailCheckSchema = z.object({
   email: z.email(),
 });
@@ -756,36 +749,104 @@ authRoutes.post("/forgot-password/", zValidator("json", forgotPasswordSchema), a
   }
 });
 
-// Set password (reset)
-authRoutes.post("/set-password/", zValidator("json", setPasswordSchema), async (c) => {
-  const { password, confirm_password, token } = c.req.valid("json");
+// Set password (authenticated - for users who signed up via magic link/OAuth)
+authRoutes.post("/set-password/", async (c) => {
+  const session = await auth.api.getSession({ headers: c.req.raw.headers });
 
-  if (password !== confirm_password) {
-    return c.json({ confirm_password: ["Passwords do not match."] }, 400);
+  if (!session) {
+    return c.json({ detail: "Authentication required." }, 401);
   }
 
-  if (!token) {
-    return c.json({ detail: "Reset token is required." }, 400);
+  const user = await db.query.users.findFirst({
+    where: eq(users.id, session.user.id),
+  });
+
+  if (!user) {
+    return c.json({ detail: "User not found." }, 400);
+  }
+
+  // Only allow if password was auto-set (magic link / OAuth signup)
+  if (!user.isPasswordAutoset) {
+    return c.json(
+      {
+        error_code: "PASSWORD_ALREADY_SET",
+        error_message: "PASSWORD_ALREADY_SET",
+        error: "Your password is already set please change your password from profile",
+      },
+      400
+    );
+  }
+
+  const body = (await c.req.json()) as { password?: string };
+  const { password } = body;
+
+  if (!password) {
+    return c.json(
+      {
+        error_code: "INVALID_PASSWORD",
+        error_message: "INVALID_PASSWORD",
+      },
+      400
+    );
+  }
+
+  if (password.length < 8) {
+    return c.json(
+      {
+        error_code: "INVALID_PASSWORD",
+        error_message: "INVALID_PASSWORD",
+      },
+      400
+    );
   }
 
   try {
-    const result = await auth.api.resetPassword({
-      body: { token, newPassword: password },
+    // Set the password using Better Auth
+    const result = await auth.api.setPassword({
+      body: { newPassword: password },
+      headers: c.req.raw.headers,
       asResponse: true,
     });
 
     if (!result.ok) {
-      const data = (await result.json()) as { message?: string };
       return c.json(
-        { detail: data.message || "Failed to reset password. Token may be invalid or expired." },
+        {
+          error_code: "INVALID_PASSWORD",
+          error_message: "INVALID_PASSWORD",
+        },
         400
       );
     }
 
-    return c.json({ detail: "Password has been reset successfully." });
+    // Mark password as no longer auto-set
+    await db.update(users).set({
+      isPasswordAutoset: false,
+      updatedAt: new Date(),
+    }).where(eq(users.id, session.user.id));
+
+    // Return updated user (matching Django's SetUserPasswordEndpoint)
+    const updatedUser = await db.query.users.findFirst({
+      where: eq(users.id, session.user.id),
+    });
+
+    const profile = await db.query.userProfiles.findFirst({
+      where: eq(userProfiles.userId, session.user.id),
+    });
+
+    return c.json({
+      id: updatedUser!.id,
+      email: updatedUser!.email,
+      first_name: updatedUser!.firstName ?? "",
+      last_name: updatedUser!.lastName ?? "",
+      display_name: updatedUser!.displayName ?? updatedUser!.name ?? "",
+      avatar: updatedUser!.avatar ?? updatedUser!.image ?? "",
+      is_onboarded: profile?.isOnboarded ?? false,
+      is_password_autoset: false,
+      is_active: updatedUser!.isActive ?? true,
+    });
   } catch (error) {
     console.error("[Auth] Set password error:", error);
-    return c.json({ detail: "Failed to reset password." }, 400);
+    return c.json({ detail: "Failed to set password." }, 400);
   }
 });
 
@@ -797,6 +858,14 @@ authRoutes.post("/change-password/", async (c) => {
     return c.json({ detail: "Authentication required." }, 401);
   }
 
+  const user = await db.query.users.findFirst({
+    where: eq(users.id, session.user.id),
+  });
+
+  if (!user) {
+    return c.json({ detail: "User not found." }, 400);
+  }
+
   const body = (await c.req.json()) as {
     old_password?: string;
     new_password?: string;
@@ -804,8 +873,29 @@ authRoutes.post("/change-password/", async (c) => {
   };
   const { old_password, new_password, confirm_password } = body;
 
-  if (!old_password || !new_password) {
-    return c.json({ detail: "Old password and new password are required." }, 400);
+  // If password is not auto-set, old password is required
+  if (!user.isPasswordAutoset) {
+    if (!old_password) {
+      return c.json(
+        {
+          error_code: "MISSING_PASSWORD",
+          error_message: "MISSING_PASSWORD",
+          error: "Old password is missing",
+        },
+        400
+      );
+    }
+  }
+
+  if (!new_password) {
+    return c.json(
+      {
+        error_code: "MISSING_PASSWORD",
+        error_message: "MISSING_PASSWORD",
+        error: "Old or new password is missing",
+      },
+      400
+    );
   }
 
   if (new_password !== confirm_password) {
@@ -813,24 +903,52 @@ authRoutes.post("/change-password/", async (c) => {
   }
 
   try {
-    const result = await auth.api.changePassword({
-      body: {
-        currentPassword: old_password,
-        newPassword: new_password,
-      },
-      headers: c.req.raw.headers,
-      asResponse: true,
-    });
+    // If password is auto-set, use setPassword; otherwise use changePassword
+    if (user.isPasswordAutoset) {
+      const result = await auth.api.setPassword({
+        body: { newPassword: new_password },
+        headers: c.req.raw.headers,
+        asResponse: true,
+      });
 
-    if (!result.ok) {
-      const data = (await result.json()) as { message?: string };
-      return c.json(
-        { detail: data.message || "Failed to change password." },
-        400
-      );
+      if (!result.ok) {
+        return c.json(
+          {
+            error_code: "INVALID_NEW_PASSWORD",
+            error_message: "INVALID_NEW_PASSWORD",
+          },
+          400
+        );
+      }
+    } else {
+      const result = await auth.api.changePassword({
+        body: {
+          currentPassword: old_password!,
+          newPassword: new_password,
+        },
+        headers: c.req.raw.headers,
+        asResponse: true,
+      });
+
+      if (!result.ok) {
+        return c.json(
+          {
+            error_code: "INCORRECT_OLD_PASSWORD",
+            error_message: "INCORRECT_OLD_PASSWORD",
+            error: "Old password is not correct",
+          },
+          400
+        );
+      }
     }
 
-    return c.json({ detail: "Password changed successfully." });
+    // Mark password as no longer auto-set
+    await db.update(users).set({
+      isPasswordAutoset: false,
+      updatedAt: new Date(),
+    }).where(eq(users.id, session.user.id));
+
+    return c.json({ message: "Password updated successfully" });
   } catch (error) {
     console.error("[Auth] Change password error:", error);
     return c.json({ detail: "Failed to change password." }, 400);

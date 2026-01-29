@@ -17,6 +17,7 @@ export const workspaces = sqliteTable(
       .notNull()
       .references(() => users.id),
     organizationSize: text("organization_size"),
+    timezone: text("timezone").default("UTC"),
 
     // Timestamps
     createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),

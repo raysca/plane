@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { eq, desc, and, inArray } from "drizzle-orm";
+import { eq, desc, and, inArray, sql } from "drizzle-orm";
 import { db } from "../../db";
 import {
   users,
@@ -36,10 +36,19 @@ function formatUserResponse(
     username: user.username ?? "",
     display_name: user.displayName ?? user.name ?? "",
     avatar: user.avatar ?? user.image ?? "",
+    avatar_url: user.avatar ?? user.image ?? "",
     cover_image: user.coverImage ?? "",
+    cover_image_url: user.coverImage ?? "",
+    date_joined: user.createdAt?.toISOString() ?? null,
     is_onboarded: profile?.isOnboarded ?? false,
     is_active: user.isActive ?? true,
+    is_bot: false,
+    is_email_verified: user.emailVerified ?? false,
+    is_password_autoset: user.isPasswordAutoset ?? false,
     is_tour_completed: profile?.isTourCompleted ?? false,
+    user_timezone: profile?.timezone ?? "UTC",
+    mobile_number: null,
+    last_login_medium: "",
     onboarding_step: profile?.onboardingStep ?? {},
     created_at: user.createdAt?.toISOString() ?? null,
     updated_at: user.updatedAt?.toISOString() ?? null,
@@ -99,6 +108,7 @@ const updateUserSchema = z.object({
   display_name: z.string().max(100).optional(),
   username: z.string().min(3).max(30).regex(/^[a-z0-9_-]+$/).optional(),
   avatar: z.string().url().optional().nullable(),
+  avatar_url: z.string().url().optional().nullable(),
   cover_image: z.string().url().optional().nullable(),
   is_onboarded: z.boolean().optional(),
   is_tour_completed: z.boolean().optional(),
@@ -226,7 +236,7 @@ userRoutes.patch("/me/", zValidator("json", updateUserSchema), async (c) => {
     ...(body.last_name !== undefined && { lastName: body.last_name }),
     ...(body.display_name !== undefined && { displayName: body.display_name }),
     ...(body.username !== undefined && { username: body.username }),
-    ...(body.avatar !== undefined && { avatar: body.avatar }),
+    ...((body.avatar !== undefined || body.avatar_url !== undefined) && { avatar: body.avatar_url ?? body.avatar }),
     ...(body.cover_image !== undefined && { coverImage: body.cover_image }),
     ...(body.is_active !== undefined && { isActive: body.is_active }),
     updatedAt: new Date(),
@@ -343,15 +353,78 @@ userRoutes.patch("/me/profile/", zValidator("json", updateProfileSchema), async 
   return c.json(formatProfileResponse(profile!));
 });
 
-// GET /api/users/me/settings/ - Get user settings (alias for profile)
+// GET /api/users/me/settings/ - Get user settings (matching Django's UserMeSettingsSerializer)
 userRoutes.get("/me/settings/", async (c) => {
   const contextUser = c.get("user");
   if (!contextUser) {
     return c.json({ detail: "Authentication required." }, 401);
   }
 
+  const user = await db.query.users.findFirst({
+    where: eq(users.id, contextUser.id),
+  });
+
+  if (!user) {
+    return c.json({ detail: "User not found." }, 404);
+  }
+
   const profile = await getOrCreateProfile(contextUser.id);
-  return c.json(formatProfileResponse(profile));
+
+  // Count pending workspace invitations
+  const inviteCount = await db.select()
+    .from(workspaceInvitations)
+    .where(eq(workspaceInvitations.email, user.email))
+    .then((rows) => rows.length);
+
+  // Get last workspace info
+  const lastWorkspaceId = profile.lastWorkspaceId;
+  let lastWorkspace = null;
+  if (lastWorkspaceId) {
+    // Verify user is still an active member of this workspace
+    const membership = await db.query.workspaceMembers.findFirst({
+      where: and(
+        eq(workspaceMembers.workspaceId, lastWorkspaceId),
+        eq(workspaceMembers.userId, contextUser.id),
+        eq(workspaceMembers.isActive, true)
+      ),
+    });
+    if (membership) {
+      lastWorkspace = await db.query.workspaces.findFirst({
+        where: eq(workspaces.id, lastWorkspaceId),
+      });
+    }
+  }
+
+  // Get fallback workspace (first workspace user is a member of)
+  let fallbackWorkspace = null;
+  if (!lastWorkspace) {
+    const firstMembership = await db.select()
+      .from(workspaceMembers)
+      .innerJoin(workspaces, eq(workspaces.id, workspaceMembers.workspaceId))
+      .where(and(
+        eq(workspaceMembers.userId, contextUser.id),
+        eq(workspaceMembers.isActive, true)
+      ))
+      .limit(1);
+
+    if (firstMembership.length > 0) {
+      fallbackWorkspace = firstMembership[0]!.workspaces;
+    }
+  }
+
+  return c.json({
+    id: user.id,
+    email: user.email,
+    workspace: {
+      last_workspace_id: lastWorkspace?.id ?? null,
+      last_workspace_slug: lastWorkspace?.slug ?? null,
+      last_workspace_name: lastWorkspace?.name ?? null,
+      last_workspace_logo: lastWorkspace?.logo ?? null,
+      fallback_workspace_id: lastWorkspace?.id ?? fallbackWorkspace?.id ?? null,
+      fallback_workspace_slug: lastWorkspace?.slug ?? fallbackWorkspace?.slug ?? null,
+      invites: inviteCount,
+    },
+  });
 });
 
 // PATCH /api/users/me/settings/ - Update user settings (same as profile)
@@ -472,34 +545,43 @@ userRoutes.get("/me/accounts/", async (c) => {
   return c.json(oauthAccounts);
 });
 
-// GET /api/users/me/workspaces/ - Get user's workspaces
+// GET /api/users/me/workspaces/ - Get user's workspaces (matching Django's UserWorkSpacesEndpoint)
 userRoutes.get("/me/workspaces/", async (c) => {
   const contextUser = c.get("user");
   if (!contextUser) {
     return c.json({ detail: "Authentication required." }, 401);
   }
 
-  // Get memberships with workspace data using a join
+  // Get memberships with workspace data and member count
   const memberships = await db
     .select({
       membership: workspaceMembers,
       workspace: workspaces,
+      memberCount: sql<number>`(SELECT COUNT(*) FROM workspace_members wm WHERE wm.workspace_id = ${workspaces.id} AND wm.is_active = 1)`,
     })
     .from(workspaceMembers)
     .innerJoin(workspaces, eq(workspaceMembers.workspaceId, workspaces.id))
-    .where(eq(workspaceMembers.userId, contextUser.id));
+    .where(and(
+      eq(workspaceMembers.userId, contextUser.id),
+      eq(workspaceMembers.isActive, true)
+    ));
 
   const workspaceList = memberships.map((m) => ({
     id: m.workspace.id,
     name: m.workspace.name,
     slug: m.workspace.slug,
-    logo: m.workspace.logo,
-    owner_id: m.workspace.ownerId,
-    organization_size: m.workspace.organizationSize,
+    logo: m.workspace.logo ?? "",
+    logo_url: m.workspace.logo ?? null,
+    owner: m.workspace.ownerId,
+    organization_size: m.workspace.organizationSize ?? "",
+    timezone: (m.workspace as any).timezone ?? "UTC",
+    url: `/${m.workspace.slug}/`,
     role: m.membership.role,
-    is_active: m.membership.isActive,
+    total_members: Number(m.memberCount),
     created_at: m.workspace.createdAt?.toISOString() ?? null,
     updated_at: m.workspace.updatedAt?.toISOString() ?? null,
+    created_by: null,
+    updated_by: null,
   }));
 
   return c.json(workspaceList);
