@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { eq, desc, and } from "drizzle-orm";
+import { eq, desc, and, inArray } from "drizzle-orm";
 import { db } from "../../db";
 import {
   users,
@@ -11,6 +11,7 @@ import {
 import {
   workspaces,
   workspaceMembers,
+  workspaceInvitations,
   recentVisits,
 } from "../../db/schema/workspace";
 import { notificationPreferences } from "../../db/schema/notification";
@@ -568,5 +569,132 @@ userRoutes.post("/me/email/:emailId/set-primary/", async (c) => {
 
   return c.json({ detail: "Email is already primary." });
 });
+
+// =====================================================
+// User Workspace Invitations
+// =====================================================
+
+// GET /api/users/me/workspaces/invitations/ - List pending workspace invitations for the current user
+userRoutes.get("/me/workspaces/invitations/", async (c) => {
+  const contextUser = c.get("user");
+  if (!contextUser) {
+    return c.json({ detail: "Authentication required." }, 401);
+  }
+
+  const dbUser = await db.query.users.findFirst({
+    where: eq(users.id, contextUser.id),
+  });
+
+  if (!dbUser) {
+    return c.json({ detail: "User not found." }, 404);
+  }
+
+  // Find all pending invitations for this user's email
+  const invitations = await db
+    .select({
+      invitation: workspaceInvitations,
+      workspace: workspaces,
+    })
+    .from(workspaceInvitations)
+    .innerJoin(workspaces, eq(workspaceInvitations.workspaceId, workspaces.id))
+    .where(eq(workspaceInvitations.email, dbUser.email))
+    .orderBy(desc(workspaceInvitations.createdAt));
+
+  const results = invitations.map((row) => ({
+    id: row.invitation.id,
+    email: row.invitation.email,
+    role: row.invitation.role,
+    message: row.invitation.message ?? "",
+    accepted: row.invitation.accepted,
+    responded_at: row.invitation.respondedAt?.toISOString() ?? null,
+    created_by_id: row.invitation.createdById,
+    created_at: row.invitation.createdAt?.toISOString() ?? null,
+    updated_at: row.invitation.updatedAt?.toISOString() ?? null,
+    workspace: {
+      id: row.workspace.id,
+      name: row.workspace.name,
+      slug: row.workspace.slug,
+      logo: row.workspace.logo ?? "",
+    },
+  }));
+
+  return c.json(results);
+});
+
+// POST /api/users/me/workspaces/invitations/ - Accept multiple workspace invitations
+userRoutes.post(
+  "/me/workspaces/invitations/",
+  zValidator("json", z.object({
+    invitations: z.array(z.string()).min(1),
+  })),
+  async (c) => {
+    const contextUser = c.get("user");
+    if (!contextUser) {
+      return c.json({ detail: "Authentication required." }, 401);
+    }
+
+    const dbUser = await db.query.users.findFirst({
+      where: eq(users.id, contextUser.id),
+    });
+
+    if (!dbUser) {
+      return c.json({ detail: "User not found." }, 404);
+    }
+
+    const { invitations: invitationIds } = c.req.valid("json");
+
+    // Find all matching invitations for this user's email
+    const matchingInvitations = await db
+      .select({
+        invitation: workspaceInvitations,
+        workspace: workspaces,
+      })
+      .from(workspaceInvitations)
+      .innerJoin(workspaces, eq(workspaceInvitations.workspaceId, workspaces.id))
+      .where(and(
+        inArray(workspaceInvitations.id, invitationIds),
+        eq(workspaceInvitations.email, dbUser.email)
+      ))
+      .orderBy(desc(workspaceInvitations.createdAt));
+
+    for (const row of matchingInvitations) {
+      const invitation = row.invitation;
+
+      // Check if already a member (possibly deactivated)
+      const existingMember = await db.query.workspaceMembers.findFirst({
+        where: and(
+          eq(workspaceMembers.workspaceId, invitation.workspaceId),
+          eq(workspaceMembers.userId, contextUser.id)
+        ),
+      });
+
+      if (existingMember) {
+        // Reactivate existing membership with the invitation's role
+        await db.update(workspaceMembers).set({
+          isActive: true,
+          role: invitation.role,
+          updatedAt: new Date(),
+        }).where(eq(workspaceMembers.id, existingMember.id));
+      } else {
+        // Create new membership
+        await db.insert(workspaceMembers).values({
+          workspaceId: invitation.workspaceId,
+          userId: contextUser.id,
+          role: invitation.role,
+        });
+      }
+    }
+
+    // Delete accepted invitations
+    if (matchingInvitations.length > 0) {
+      const idsToDelete = matchingInvitations.map((r) => r.invitation.id);
+      await db.delete(workspaceInvitations).where(
+        inArray(workspaceInvitations.id, idsToDelete)
+      );
+    }
+
+    return new Response(null, { status: 204 });
+  }
+);
 
 export { userRoutes };

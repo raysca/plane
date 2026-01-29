@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { eq, and, desc, asc } from "drizzle-orm";
+import { eq, and, desc, asc, inArray } from "drizzle-orm";
 import { db } from "../../db";
 import { users } from "../../db/schema/user";
 import {
@@ -57,6 +57,15 @@ const createInvitationSchema = z.object({
     role: z.number().int().refine((v) => [5, 10, 15, 20].includes(v)),
   })).min(1),
   message: z.string().max(500).optional(),
+});
+
+const updateInvitationSchema = z.object({
+  role: z.number().int().refine((v) => [5, 10, 15, 20].includes(v)).optional(),
+});
+
+const joinInvitationSchema = z.object({
+  email: z.string().email(),
+  accepted: z.boolean().default(false),
 });
 
 const createLabelSchema = z.object({
@@ -205,6 +214,133 @@ workspaceRoutes.post("/", zValidator("json", createWorkspaceSchema), async (c) =
   });
 
   return c.json(formatWorkspace(workspace), 201);
+});
+
+// =====================================================
+// Invitation Join Routes (NO workspace membership required)
+// These must be registered BEFORE workspaceMiddleware
+// because the user may not be a workspace member yet.
+// =====================================================
+
+// GET /api/workspaces/:slug/invitations/:id/join/ - Get invitation details (for invitation page)
+workspaceRoutes.get("/:slug/invitations/:id/join/", async (c) => {
+  const slug = c.req.param("slug");
+  const invitationId = c.req.param("id");
+
+  const workspace = await db.query.workspaces.findFirst({
+    where: eq(workspaces.slug, slug),
+  });
+
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  const invitation = await db.query.workspaceInvitations.findFirst({
+    where: and(
+      eq(workspaceInvitations.id, invitationId),
+      eq(workspaceInvitations.workspaceId, workspace.id)
+    ),
+  });
+
+  if (!invitation) {
+    return c.json({ detail: "Invitation not found." }, 404);
+  }
+
+  return c.json({
+    ...formatInvitation(invitation),
+    workspace: {
+      id: workspace.id,
+      name: workspace.name,
+      slug: workspace.slug,
+      logo: workspace.logo ?? "",
+    },
+  });
+});
+
+// POST /api/workspaces/:slug/invitations/:id/join/ - Accept/reject invitation
+workspaceRoutes.post("/:slug/invitations/:id/join/", zValidator("json", joinInvitationSchema), async (c) => {
+  const slug = c.req.param("slug");
+  const invitationId = c.req.param("id");
+  const body = c.req.valid("json");
+
+  const workspace = await db.query.workspaces.findFirst({
+    where: eq(workspaces.slug, slug),
+  });
+
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  const invitation = await db.query.workspaceInvitations.findFirst({
+    where: and(
+      eq(workspaceInvitations.id, invitationId),
+      eq(workspaceInvitations.workspaceId, workspace.id)
+    ),
+  });
+
+  if (!invitation) {
+    return c.json({ detail: "Invitation not found." }, 404);
+  }
+
+  // Check the email matches
+  if (!body.email || invitation.email !== body.email) {
+    return c.json(
+      { error: "You do not have permission to join the workspace" },
+      403
+    );
+  }
+
+  // If already responded then return error
+  if (invitation.respondedAt) {
+    return c.json(
+      { error: "You have already responded to the invitation request" },
+      400
+    );
+  }
+
+  // Mark invitation as responded
+  await db.update(workspaceInvitations).set({
+    accepted: body.accepted,
+    respondedAt: new Date(),
+    updatedAt: new Date(),
+  }).where(eq(workspaceInvitations.id, invitationId));
+
+  if (body.accepted) {
+    // Check if the user has an account
+    const invitedUser = await db.query.users.findFirst({
+      where: eq(users.email, body.email),
+    });
+
+    if (invitedUser) {
+      // Check if already a member (possibly deactivated)
+      const existingMember = await db.query.workspaceMembers.findFirst({
+        where: and(
+          eq(workspaceMembers.workspaceId, workspace.id),
+          eq(workspaceMembers.userId, invitedUser.id)
+        ),
+      });
+
+      if (existingMember) {
+        // Reactivate existing membership
+        await db.update(workspaceMembers).set({
+          isActive: true,
+          role: invitation.role,
+          updatedAt: new Date(),
+        }).where(eq(workspaceMembers.id, existingMember.id));
+      } else {
+        // Create new membership
+        await db.insert(workspaceMembers).values({
+          workspaceId: workspace.id,
+          userId: invitedUser.id,
+          role: invitation.role,
+        });
+      }
+
+      // Delete the invitation after successful join
+      await db.delete(workspaceInvitations).where(eq(workspaceInvitations.id, invitationId));
+    }
+
+    return c.json({ message: "Workspace Invitation Accepted" });
+  }
+
+  // Invitation rejected
+  return c.json({ message: "Workspace Invitation was not accepted" });
 });
 
 // Apply workspace middleware for slug-based routes
@@ -424,34 +560,56 @@ workspaceRoutes.get("/:slug/invitations/", requireWorkspaceAdmin, async (c) => {
   return c.json(invitations.map(formatInvitation));
 });
 
-// POST /api/workspaces/:slug/invitations/ - Create invitations
+// POST /api/workspaces/:slug/invitations/ - Create invitations (bulk email invite)
 workspaceRoutes.post("/:slug/invitations/", requireWorkspaceAdmin, zValidator("json", createInvitationSchema), async (c) => {
   const workspace = c.get("workspace");
   const user = c.get("user");
-  if (!workspace || !user) return c.json({ detail: "Not found." }, 404);
+  const membership = c.get("workspaceMembership");
+  if (!workspace || !user || !membership) return c.json({ detail: "Not found." }, 404);
 
   const body = c.req.valid("json");
+
+  // Check if any invited user has a higher role than the requesting user
+  const higherRoleInvites = body.emails.filter((e) => e.role > membership.role);
+  if (higherRoleInvites.length > 0) {
+    return c.json(
+      { error: "You cannot invite a user with higher role" },
+      400
+    );
+  }
+
+  // Check if any users are already members
+  const emailList = body.emails.map((e) => e.email.trim().toLowerCase());
+  const existingMembers = await db
+    .select({ user: users, membership: workspaceMembers })
+    .from(workspaceMembers)
+    .innerJoin(users, eq(workspaceMembers.userId, users.id))
+    .where(and(
+      eq(workspaceMembers.workspaceId, workspace.id),
+      inArray(users.email, emailList),
+      eq(workspaceMembers.isActive, true)
+    ));
+
+  if (existingMembers.length > 0) {
+    return c.json(
+      {
+        error: "Some users are already member of workspace",
+        workspace_users: existingMembers.map((m) => formatMember(m.membership, m.user)),
+      },
+      400
+    );
+  }
+
   const created = [];
 
   for (const invite of body.emails) {
-    // Check if already a member
-    const existingMember = await db
-      .select()
-      .from(workspaceMembers)
-      .innerJoin(users, eq(workspaceMembers.userId, users.id))
-      .where(and(
-        eq(workspaceMembers.workspaceId, workspace.id),
-        eq(users.email, invite.email)
-      ))
-      .limit(1);
-
-    if (existingMember.length > 0) continue;
+    const normalizedEmail = invite.email.trim().toLowerCase();
 
     // Check if already invited (pending)
     const existingInvite = await db.query.workspaceInvitations.findFirst({
       where: and(
         eq(workspaceInvitations.workspaceId, workspace.id),
-        eq(workspaceInvitations.email, invite.email),
+        eq(workspaceInvitations.email, normalizedEmail),
       ),
     });
 
@@ -461,7 +619,7 @@ workspaceRoutes.post("/:slug/invitations/", requireWorkspaceAdmin, zValidator("j
 
     const invResult = await db.insert(workspaceInvitations).values({
       workspaceId: workspace.id,
-      email: invite.email,
+      email: normalizedEmail,
       role: invite.role,
       token,
       message: body.message,
@@ -469,9 +627,55 @@ workspaceRoutes.post("/:slug/invitations/", requireWorkspaceAdmin, zValidator("j
     }).returning();
 
     created.push(formatInvitation(invResult[0]!));
+
+    // TODO: Send invitation email
+    // In Django this triggers workspace_invitation.delay() Celery task
+    // For now, log the invitation for debugging
+    console.log(`[Invitation] Workspace invite sent to ${normalizedEmail} for workspace ${workspace.slug}`);
   }
 
   return c.json(created, 201);
+});
+
+// PATCH /api/workspaces/:slug/invitations/:id/ - Update invitation (e.g., role)
+workspaceRoutes.patch("/:slug/invitations/:id/", requireWorkspaceAdmin, zValidator("json", updateInvitationSchema), async (c) => {
+  const workspace = c.get("workspace");
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  const invitationId = c.req.param("id");
+  const body = c.req.valid("json");
+
+  const invitation = await db.query.workspaceInvitations.findFirst({
+    where: and(
+      eq(workspaceInvitations.id, invitationId),
+      eq(workspaceInvitations.workspaceId, workspace.id)
+    ),
+  });
+
+  if (!invitation) {
+    return c.json({ detail: "Invitation not found." }, 404);
+  }
+
+  // Cannot update if already accepted or responded
+  if (invitation.accepted || invitation.respondedAt) {
+    return c.json({ detail: "Cannot update an invitation that has already been responded to." }, 400);
+  }
+
+  const updateData: Record<string, unknown> = {
+    updatedAt: new Date(),
+  };
+
+  if (body.role !== undefined) {
+    updateData.role = body.role;
+  }
+
+  await db.update(workspaceInvitations).set(updateData).where(eq(workspaceInvitations.id, invitationId));
+
+  const updated = await db.query.workspaceInvitations.findFirst({
+    where: eq(workspaceInvitations.id, invitationId),
+  });
+
+  return c.json(formatInvitation(updated!));
 });
 
 // DELETE /api/workspaces/:slug/invitations/:id/ - Cancel invitation
@@ -495,74 +699,6 @@ workspaceRoutes.delete("/:slug/invitations/:id/", requireWorkspaceAdmin, async (
   await db.delete(workspaceInvitations).where(eq(workspaceInvitations.id, invitationId));
 
   return new Response(null, { status: 204 });
-});
-
-// POST /api/workspaces/:slug/invitations/:id/join/ - Accept invitation
-workspaceRoutes.post("/:slug/invitations/:id/join/", async (c) => {
-  const user = c.get("user");
-  if (!user) return c.json({ detail: "Authentication required." }, 401);
-
-  const slug = c.req.param("slug");
-  const invitationId = c.req.param("id");
-
-  // Find workspace directly (user may not be a member yet)
-  const workspace = await db.query.workspaces.findFirst({
-    where: eq(workspaces.slug, slug),
-  });
-
-  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
-
-  const invitation = await db.query.workspaceInvitations.findFirst({
-    where: and(
-      eq(workspaceInvitations.id, invitationId),
-      eq(workspaceInvitations.workspaceId, workspace.id)
-    ),
-  });
-
-  if (!invitation) {
-    return c.json({ detail: "Invitation not found." }, 404);
-  }
-
-  // Verify email matches
-  const dbUser = await db.query.users.findFirst({
-    where: eq(users.id, user.id),
-  });
-
-  if (!dbUser || dbUser.email !== invitation.email) {
-    return c.json({ detail: "This invitation is not for your email address." }, 403);
-  }
-
-  if (invitation.respondedAt) {
-    return c.json({ detail: "This invitation has already been responded to." }, 400);
-  }
-
-  // Check if already a member
-  const existingMember = await db.query.workspaceMembers.findFirst({
-    where: and(
-      eq(workspaceMembers.workspaceId, workspace.id),
-      eq(workspaceMembers.userId, user.id)
-    ),
-  });
-
-  if (existingMember) {
-    return c.json({ detail: "You are already a member of this workspace." }, 400);
-  }
-
-  // Create membership
-  await db.insert(workspaceMembers).values({
-    workspaceId: workspace.id,
-    userId: user.id,
-    role: invitation.role,
-  });
-
-  // Mark invitation as accepted
-  await db.update(workspaceInvitations).set({
-    accepted: true,
-    respondedAt: new Date(),
-    updatedAt: new Date(),
-  }).where(eq(workspaceInvitations.id, invitationId));
-
-  return c.json({ detail: "Successfully joined workspace." });
 });
 
 // =====================================================
