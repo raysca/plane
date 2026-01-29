@@ -743,7 +743,48 @@ workspaceRoutes.get("/:slug/views/", async (c) => {
 
 // My Issues
 workspaceRoutes.get("/:slug/my-issues/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const { issueAssignees, issues } = await import("../../db/schema/issue");
+  const { isNull, and: andOp, eq: eqOp, asc: ascOp, inArray: inArrayOp } = await import("drizzle-orm");
+
+  // Get all issues assigned to user in this workspace
+  const assignedIssueIds = await db
+    .select({ issueId: issueAssignees.issueId })
+    .from(issueAssignees)
+    .where(eqOp(issueAssignees.assigneeId, user.id));
+
+  if (assignedIssueIds.length === 0) return c.json([]);
+
+  const myIssues = await db
+    .select()
+    .from(issues)
+    .where(
+      andOp(
+        inArrayOp(issues.id, assignedIssueIds.map((a) => a.issueId)),
+        eqOp(issues.workspaceId, workspace.id),
+        isNull(issues.deletedAt),
+        isNull(issues.archivedAt)
+      )!
+    )
+    .orderBy(ascOp(issues.sortOrder));
+
+  return c.json(myIssues.map((i) => ({
+    id: i.id,
+    project_id: i.projectId,
+    workspace_id: i.workspaceId,
+    name: i.name,
+    state_id: i.stateId ?? null,
+    priority: i.priority ?? 0,
+    sort_order: i.sortOrder ?? 65535,
+    start_date: i.startDate?.toISOString()?.split("T")[0] ?? null,
+    target_date: i.targetDate?.toISOString()?.split("T")[0] ?? null,
+    sequence_id: i.sequenceId ?? null,
+    created_at: i.createdAt?.toISOString() ?? null,
+    updated_at: i.updatedAt?.toISOString() ?? null,
+  })));
 });
 
 // Search
