@@ -112,6 +112,7 @@ export const userProfiles = sqliteTable("user_profiles", {
   timeFormat: text("time_format").default("12h"),
   theme: text("theme").default("system"),
   language: text("language").default("en"),
+  lastWorkspaceId: text("last_workspace_id"),
   createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
   updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
 });

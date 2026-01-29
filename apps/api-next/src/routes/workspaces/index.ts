@@ -19,6 +19,9 @@ import {
 } from "../../middleware/workspace";
 import type { Variables } from "../../app";
 import { generateSlug, isValidSlug } from "../../lib/utils";
+import { seedWorkspace } from "../../lib/workspace-seeder";
+import { userProfiles } from "../../db/schema/user";
+import { sql } from "drizzle-orm";
 
 const workspaceRoutes = new Hono<{ Variables: Variables }>();
 
@@ -53,7 +56,7 @@ const updateMemberSchema = z.object({
 
 const createInvitationSchema = z.object({
   emails: z.array(z.object({
-    email: z.string().email(),
+    email: z.email(),
     role: z.number().int().refine((v) => [5, 10, 15, 20].includes(v)),
   })).min(1),
   message: z.string().max(500).optional(),
@@ -64,7 +67,7 @@ const updateInvitationSchema = z.object({
 });
 
 const joinInvitationSchema = z.object({
-  email: z.string().email(),
+  email: z.email(),
   accepted: z.boolean().default(false),
 });
 
@@ -159,6 +162,7 @@ workspaceRoutes.get("/", async (c) => {
     .select({
       membership: workspaceMembers,
       workspace: workspaces,
+      memberCount: sql<number>`(SELECT COUNT(*) FROM ${workspaceMembers} WHERE ${workspaceMembers.workspaceId} = ${workspaces.id} AND ${workspaceMembers.isActive} = 1)`,
     })
     .from(workspaceMembers)
     .innerJoin(workspaces, eq(workspaceMembers.workspaceId, workspaces.id))
@@ -167,7 +171,7 @@ workspaceRoutes.get("/", async (c) => {
   const results = memberships.map((m) => ({
     ...formatWorkspace(m.workspace),
     role: m.membership.role,
-    total_members: 0, // TODO: count members
+    total_members: Number(m.memberCount),
   }));
 
   return c.json(results);
@@ -187,13 +191,19 @@ workspaceRoutes.post("/", zValidator("json", createWorkspaceSchema), async (c) =
     return c.json({ slug: ["Invalid slug format. Use lowercase letters, numbers, and hyphens."] }, 400);
   }
 
+  // Validate name (no URLs)
+  const urlRegex = /(https?:\/\/[^\s]+)/g;
+  if (urlRegex.test(body.name)) {
+    return c.json({ name: ["Name cannot contain a URL"] }, 400);
+  }
+
   // Check slug uniqueness
   const existing = await db.query.workspaces.findFirst({
     where: eq(workspaces.slug, slug),
   });
 
   if (existing) {
-    return c.json({ slug: ["A workspace with this slug already exists."] }, 400);
+    return c.json({ slug: ["Workspace with this slug already exists."] }, 400);
   }
 
   // Create workspace
@@ -204,7 +214,9 @@ workspaceRoutes.post("/", zValidator("json", createWorkspaceSchema), async (c) =
     organizationSize: body.organization_size,
     logo: body.logo,
   }).returning();
-  const workspace = result[0]!;
+
+  const workspace = result[0];
+  if (!workspace) throw new Error("Failed to create workspace");
 
   // Add creator as admin member
   await db.insert(workspaceMembers).values({
@@ -212,6 +224,11 @@ workspaceRoutes.post("/", zValidator("json", createWorkspaceSchema), async (c) =
     userId: user.id,
     role: ROLES.ADMIN,
   });
+
+  // Seed workspace
+  await seedWorkspace(workspace.id, user.id);
+
+  console.log(`[Workspace] Created workspace ${workspace.slug}`);
 
   return c.json(formatWorkspace(workspace), 201);
 });
@@ -383,7 +400,14 @@ workspaceRoutes.delete("/:slug/", requireWorkspaceOwner, async (c) => {
   const workspace = c.get("workspace");
   if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
 
+  // Update lastWorkspaceId for users who have this as their last workspace
+  await db.update(userProfiles)
+    .set({ lastWorkspaceId: null })
+    .where(eq(userProfiles.lastWorkspaceId, workspace.id));
+
   await db.delete(workspaces).where(eq(workspaces.id, workspace.id));
+
+  console.log(`[Workspace] Deleted workspace ${workspace.slug}`);
 
   return new Response(null, { status: 204 });
 });

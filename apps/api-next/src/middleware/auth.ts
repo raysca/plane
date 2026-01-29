@@ -21,6 +21,8 @@ export const authMiddleware = createMiddleware<{ Variables: Variables }>(async (
     const session = await auth.api.getSession({ headers: c.req.raw.headers });
 
     if (!session) {
+      console.log("[AuthDebug] Headers:", c.req.raw.headers);
+      console.log("[AuthDebug] Session not found");
       return c.json({ detail: "Authentication credentials were not provided." }, 401);
     }
 

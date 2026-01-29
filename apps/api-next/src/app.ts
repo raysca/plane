@@ -104,12 +104,12 @@ app.get("/api/health/", (c) => {
 app.on(["POST", "GET"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 
 // Mount routes
-app.route("/auth", authRoutes);
+app.route("/auth/", authRoutes);
 app.route("/api/instances/", instanceRoutes);
-app.route("/api/users", userRoutes);
-app.route("/api/workspaces", workspaceRoutes);
-app.route("/api/workspaces/:slug/projects", projectRoutes);
-app.route("/api/workspaces/:slug/projects/:projectId/issues", issueRoutes);
+app.route("/api/users/", userRoutes);
+app.route("/api/workspaces/", workspaceRoutes);
+app.route("/api/workspaces/:slug/projects/", projectRoutes);
+app.route("/api/workspaces/:slug/projects/:projectId/issues/", issueRoutes);
 app.route("/api/workspace-slug-check/", workspaceSlugCheckRoutes);
 
 // 404 handler
