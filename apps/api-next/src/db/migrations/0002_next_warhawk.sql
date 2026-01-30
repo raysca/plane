@@ -1,1 +1,0 @@
-ALTER TABLE `users` ADD `is_password_autoset` integer DEFAULT false;

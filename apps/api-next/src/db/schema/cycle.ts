@@ -121,3 +121,94 @@ export const cycleFavoritesRelations = relations(cycleFavorites, ({ one }) => ({
     references: [users.id],
   }),
 }));
+
+// --- Default Props for Cycle User Properties ---
+const defaultFilters = {
+  priority: null,
+  state: null,
+  state_group: null,
+  assignees: null,
+  created_by: null,
+  labels: null,
+  start_date: null,
+  target_date: null,
+  subscriber: null,
+};
+
+const defaultDisplayFilters = {
+  group_by: null,
+  order_by: "-created_at",
+  type: null,
+  sub_issue: true,
+  show_empty_groups: true,
+  layout: "list",
+  calendar_date_range: "",
+};
+
+const defaultDisplayProperties = {
+  assignee: true,
+  attachment_count: true,
+  created_on: true,
+  due_date: true,
+  estimate: true,
+  key: true,
+  labels: true,
+  link: true,
+  priority: true,
+  start_date: true,
+  state: true,
+  sub_issue_count: true,
+  updated_on: true,
+};
+
+// Cycle User Properties (per-user display settings for a cycle)
+export const cycleUserProperties = sqliteTable(
+  "cycle_user_properties",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    cycleId: text("cycle_id")
+      .notNull()
+      .references(() => cycles.id, { onDelete: "cascade" }),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    filters: text("filters", { mode: "json" }).$defaultFn(() => defaultFilters),
+    displayFilters: text("display_filters", { mode: "json" }).$defaultFn(() => defaultDisplayFilters),
+    displayProperties: text("display_properties", { mode: "json" }).$defaultFn(() => defaultDisplayProperties),
+    richFilters: text("rich_filters", { mode: "json" }).$defaultFn(() => ({})),
+    createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+  },
+  (table) => [
+    unique("cycle_user_prop_unique").on(table.cycleId, table.userId),
+    index("cycle_user_prop_cycle_idx").on(table.cycleId),
+    index("cycle_user_prop_user_idx").on(table.userId),
+  ]
+);
+
+export const cycleUserPropertiesRelations = relations(cycleUserProperties, ({ one }) => ({
+  cycle: one(cycles, {
+    fields: [cycleUserProperties.cycleId],
+    references: [cycles.id],
+  }),
+  project: one(projects, {
+    fields: [cycleUserProperties.projectId],
+    references: [projects.id],
+  }),
+  workspace: one(workspaces, {
+    fields: [cycleUserProperties.workspaceId],
+    references: [workspaces.id],
+  }),
+  user: one(users, {
+    fields: [cycleUserProperties.userId],
+    references: [users.id],
+  }),
+}));

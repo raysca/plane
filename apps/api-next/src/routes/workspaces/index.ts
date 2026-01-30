@@ -27,11 +27,11 @@ import { seedWorkspace } from "../../lib/workspace-seeder";
 import { userProfiles } from "../../db/schema/user";
 import { notifications } from "../../db/schema/notification";
 import { issues, issueAssignees } from "../../db/schema/issue";
-import { projects, projectMembers } from "../../db/schema/project";
+import { projects, projectMembers, states, labels } from "../../db/schema/project";
 import { pages } from "../../db/schema/page";
-import { cycles } from "../../db/schema/cycle";
-import { modules } from "../../db/schema/module";
-import { views } from "../../db/schema/view";
+import { cycles, cycleIssues, cycleFavorites } from "../../db/schema/cycle";
+import { modules, moduleIssues, moduleMembers, moduleFavorites, moduleLinks } from "../../db/schema/module";
+import { views, viewFavorites } from "../../db/schema/view";
 import { sql, not, like, isNull, count, lt, max } from "drizzle-orm";
 import homePreferenceRoutes from "./home-preference";
 import userPropertiesRoutes from "./user-properties";
@@ -909,17 +909,50 @@ workspaceRoutes.delete("/:slug/invitations/:id/", requireWorkspaceAdmin, async (
 // 3.4 Workspace Labels
 // =====================================================
 
-// GET /api/workspaces/:slug/labels/ - List workspace labels
+// GET /api/workspaces/:slug/labels/ - List all project labels across workspace
+// Django: Returns labels from all projects the user is an active member of (excluding archived projects)
 workspaceRoutes.get("/:slug/labels/", async (c) => {
   const workspace = c.get("workspace");
-  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+  const user = c.get("user");
+  if (!workspace || !user) return c.json({ detail: "Not found." }, 404);
 
-  const labels = await db.query.workspaceLabels.findMany({
-    where: eq(workspaceLabels.workspaceId, workspace.id),
-    orderBy: [asc(workspaceLabels.sortOrder)],
+  // Get project IDs where user is an active member and project is not archived
+  const memberProjects = await db
+    .select({ projectId: projectMembers.projectId })
+    .from(projectMembers)
+    .innerJoin(projects, eq(projects.id, projectMembers.projectId))
+    .where(
+      and(
+        eq(projects.workspaceId, workspace.id),
+        eq(projectMembers.memberId, user.id),
+        eq(projectMembers.isActive, true),
+        isNull(projects.archivedAt)
+      )
+    );
+
+  const projectIds = memberProjects.map((p) => p.projectId);
+
+  if (projectIds.length === 0) {
+    return c.json([]);
+  }
+
+  const projectLabels = await db.query.labels.findMany({
+    where: and(
+      eq(labels.workspaceId, workspace.id),
+      inArray(labels.projectId, projectIds)
+    ),
+    orderBy: [asc(labels.sortOrder)],
   });
 
-  return c.json(labels.map(formatLabel));
+  return c.json(projectLabels.map((l) => ({
+    id: l.id,
+    project_id: l.projectId,
+    workspace_id: l.workspaceId,
+    parent: l.parentId ?? null,
+    name: l.name,
+    color: l.color,
+    sort_order: l.sortOrder ?? 65535,
+  })));
 });
 
 // POST /api/workspaces/:slug/labels/ - Create label
@@ -1200,23 +1233,781 @@ workspaceRoutes.get("/:slug/recent-visits/", async (c) => {
 
 // Projects (Phase 4) - Handled by projectRoutes mounted at /api/workspaces/:slug/projects
 
-// Cycles
+// Cycles — GET /api/workspaces/:slug/cycles/
+// Lists all non-archived cycles across the workspace with issue statistics
+// Matches Django's WorkspaceCyclesEndpoint
 workspaceRoutes.get("/:slug/cycles/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  // Fetch all non-archived cycles in this workspace
+  const allCycles = await db
+    .select()
+    .from(cycles)
+    .where(and(eq(cycles.workspaceId, workspace.id), isNull(cycles.archivedAt)))
+    .orderBy(desc(cycles.createdAt));
+
+  if (allCycles.length === 0) {
+    return c.json([]);
+  }
+
+  const cycleIds = allCycles.map((c) => c.id);
+
+  // Fetch favorites for current user
+  const userFavorites = await db
+    .select({ cycleId: cycleFavorites.cycleId })
+    .from(cycleFavorites)
+    .where(and(inArray(cycleFavorites.cycleId, cycleIds), eq(cycleFavorites.userId, user.id)));
+
+  const favCycleIds = new Set(userFavorites.map((f) => f.cycleId));
+
+  // Compute issue statistics per cycle
+  // Join cycle_issues -> issues -> states to count by state group
+  const issueStats = await db
+    .select({
+      cycleId: cycleIssues.cycleId,
+      stateGroup: states.group,
+      issueCount: count(),
+    })
+    .from(cycleIssues)
+    .innerJoin(issues, eq(cycleIssues.issueId, issues.id))
+    .innerJoin(states, eq(issues.stateId, states.id))
+    .where(
+      and(
+        inArray(cycleIssues.cycleId, cycleIds),
+        isNull(issues.archivedAt),
+        isNull(issues.deletedAt)
+      )
+    )
+    .groupBy(cycleIssues.cycleId, states.group);
+
+  // Build stats map
+  const statsMap = new Map<
+    string,
+    { total: number; completed: number; cancelled: number; started: number; unstarted: number; backlog: number }
+  >();
+
+  for (const row of issueStats) {
+    const existing = statsMap.get(row.cycleId) || {
+      total: 0,
+      completed: 0,
+      cancelled: 0,
+      started: 0,
+      unstarted: 0,
+      backlog: 0,
+    };
+    const cnt = Number(row.issueCount);
+    existing.total += cnt;
+    switch (row.stateGroup) {
+      case "completed":
+        existing.completed += cnt;
+        break;
+      case "cancelled":
+        existing.cancelled += cnt;
+        break;
+      case "started":
+        existing.started += cnt;
+        break;
+      case "unstarted":
+        existing.unstarted += cnt;
+        break;
+      case "backlog":
+        existing.backlog += cnt;
+        break;
+    }
+    statsMap.set(row.cycleId, existing);
+  }
+
+  // Compute cycle status based on dates
+  const now = new Date();
+  function getCycleStatus(startDate: Date | null, endDate: Date | null): string {
+    if (!startDate || !endDate) return "draft";
+    if (endDate < now) return "completed";
+    if (startDate <= now && endDate >= now) return "current";
+    return "upcoming";
+  }
+
+  // Format response matching Django's CycleSerializer
+  const result = allCycles.map((cy) => {
+    const stats = statsMap.get(cy.id) || {
+      total: 0,
+      completed: 0,
+      cancelled: 0,
+      started: 0,
+      unstarted: 0,
+      backlog: 0,
+    };
+
+    return {
+      id: cy.id,
+      workspace_id: cy.workspaceId,
+      project_id: cy.projectId,
+      name: cy.name,
+      description: cy.description ?? "",
+      start_date: cy.startDate?.toISOString().split("T")[0] ?? null,
+      end_date: cy.endDate?.toISOString().split("T")[0] ?? null,
+      owned_by_id: cy.ownedById ?? null,
+      view_props: cy.viewProps ?? {},
+      sort_order: cy.sortOrder ?? 65535,
+      progress_snapshot: cy.progressSnapshot ?? {},
+      is_favorite: favCycleIds.has(cy.id),
+      status: getCycleStatus(cy.startDate, cy.endDate),
+      total_issues: stats.total,
+      completed_issues: stats.completed,
+      cancelled_issues: stats.cancelled,
+      started_issues: stats.started,
+      unstarted_issues: stats.unstarted,
+      backlog_issues: stats.backlog,
+      created_at: cy.createdAt?.toISOString() ?? null,
+      updated_at: cy.updatedAt?.toISOString() ?? null,
+      archived_at: cy.archivedAt?.toISOString() ?? null,
+    };
+  });
+
+  return c.json(result);
 });
 
+// Active Cycles — GET /api/workspaces/:slug/active-cycles/
+// Lists currently active (current status) cycles with pagination
 workspaceRoutes.get("/:slug/active-cycles/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const cursor = c.req.query("cursor") || "0:0";
+  const perPage = parseInt(c.req.query("per_page") || "10", 10);
+
+  const now = new Date();
+
+  // Fetch active (current) cycles: start_date <= now AND end_date >= now, not archived
+  const activeCycles = await db
+    .select()
+    .from(cycles)
+    .where(
+      and(
+        eq(cycles.workspaceId, workspace.id),
+        isNull(cycles.archivedAt),
+        sql`${cycles.startDate} IS NOT NULL`,
+        sql`${cycles.endDate} IS NOT NULL`,
+        sql`${cycles.startDate} <= ${Math.floor(now.getTime() / 1000)}`,
+        sql`${cycles.endDate} >= ${Math.floor(now.getTime() / 1000)}`
+      )
+    )
+    .orderBy(desc(cycles.createdAt));
+
+  // Simple offset-based pagination from cursor
+  const [cursorOffset] = cursor.split(":").map(Number);
+  const offset = cursorOffset || 0;
+  const paginatedCycles = activeCycles.slice(offset, offset + perPage);
+  const hasNext = offset + perPage < activeCycles.length;
+  const nextOffset = offset + perPage;
+
+  if (paginatedCycles.length === 0) {
+    return c.json({
+      count: activeCycles.length,
+      extra_stats: null,
+      next_cursor: `${nextOffset}:0`,
+      next_page_results: false,
+      prev_cursor: `${Math.max(0, offset - perPage)}:0`,
+      results: [],
+      total_pages: Math.ceil(activeCycles.length / perPage),
+    });
+  }
+
+  const cycleIds = paginatedCycles.map((cy) => cy.id);
+
+  // Favorites
+  const userFavorites = await db
+    .select({ cycleId: cycleFavorites.cycleId })
+    .from(cycleFavorites)
+    .where(and(inArray(cycleFavorites.cycleId, cycleIds), eq(cycleFavorites.userId, user.id)));
+
+  const favCycleIds = new Set(userFavorites.map((f) => f.cycleId));
+
+  // Issue stats
+  const issueStats = await db
+    .select({
+      cycleId: cycleIssues.cycleId,
+      stateGroup: states.group,
+      issueCount: count(),
+    })
+    .from(cycleIssues)
+    .innerJoin(issues, eq(cycleIssues.issueId, issues.id))
+    .innerJoin(states, eq(issues.stateId, states.id))
+    .where(
+      and(
+        inArray(cycleIssues.cycleId, cycleIds),
+        isNull(issues.archivedAt),
+        isNull(issues.deletedAt)
+      )
+    )
+    .groupBy(cycleIssues.cycleId, states.group);
+
+  const statsMap = new Map<
+    string,
+    { total: number; completed: number; cancelled: number; started: number; unstarted: number; backlog: number }
+  >();
+
+  for (const row of issueStats) {
+    const existing = statsMap.get(row.cycleId) || {
+      total: 0,
+      completed: 0,
+      cancelled: 0,
+      started: 0,
+      unstarted: 0,
+      backlog: 0,
+    };
+    const cnt = Number(row.issueCount);
+    existing.total += cnt;
+    switch (row.stateGroup) {
+      case "completed":
+        existing.completed += cnt;
+        break;
+      case "cancelled":
+        existing.cancelled += cnt;
+        break;
+      case "started":
+        existing.started += cnt;
+        break;
+      case "unstarted":
+        existing.unstarted += cnt;
+        break;
+      case "backlog":
+        existing.backlog += cnt;
+        break;
+    }
+    statsMap.set(row.cycleId, existing);
+  }
+
+  const results = paginatedCycles.map((cy) => {
+    const stats = statsMap.get(cy.id) || {
+      total: 0,
+      completed: 0,
+      cancelled: 0,
+      started: 0,
+      unstarted: 0,
+      backlog: 0,
+    };
+
+    return {
+      id: cy.id,
+      workspace_id: cy.workspaceId,
+      project_id: cy.projectId,
+      name: cy.name,
+      description: cy.description ?? "",
+      start_date: cy.startDate?.toISOString().split("T")[0] ?? null,
+      end_date: cy.endDate?.toISOString().split("T")[0] ?? null,
+      owned_by_id: cy.ownedById ?? null,
+      view_props: cy.viewProps ?? {},
+      sort_order: cy.sortOrder ?? 65535,
+      progress_snapshot: cy.progressSnapshot ?? {},
+      is_favorite: favCycleIds.has(cy.id),
+      status: "current" as const,
+      total_issues: stats.total,
+      completed_issues: stats.completed,
+      cancelled_issues: stats.cancelled,
+      started_issues: stats.started,
+      unstarted_issues: stats.unstarted,
+      backlog_issues: stats.backlog,
+      created_at: cy.createdAt?.toISOString() ?? null,
+      updated_at: cy.updatedAt?.toISOString() ?? null,
+      archived_at: cy.archivedAt?.toISOString() ?? null,
+    };
+  });
+
+  return c.json({
+    count: activeCycles.length,
+    extra_stats: null,
+    next_cursor: `${nextOffset}:0`,
+    next_page_results: hasNext,
+    prev_cursor: `${Math.max(0, offset - perPage)}:0`,
+    results,
+    total_pages: Math.ceil(activeCycles.length / perPage),
+  });
 });
 
-// Modules
+// Modules — GET /api/workspaces/:slug/modules/
+// Lists all non-archived modules across the workspace with issue statistics
+// Matches Django's WorkspaceModulesEndpoint
 workspaceRoutes.get("/:slug/modules/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  // Fetch all non-archived modules in this workspace
+  const allModules = await db
+    .select()
+    .from(modules)
+    .where(and(eq(modules.workspaceId, workspace.id), isNull(modules.archivedAt)))
+    .orderBy(desc(modules.createdAt));
+
+  if (allModules.length === 0) {
+    return c.json([]);
+  }
+
+  const moduleIds = allModules.map((m) => m.id);
+
+  // Fetch members for all modules
+  const allMembers = await db
+    .select({ moduleId: moduleMembers.moduleId, memberId: moduleMembers.memberId })
+    .from(moduleMembers)
+    .where(inArray(moduleMembers.moduleId, moduleIds));
+
+  const membersByModule = new Map<string, string[]>();
+  for (const mm of allMembers) {
+    const existing = membersByModule.get(mm.moduleId) || [];
+    existing.push(mm.memberId);
+    membersByModule.set(mm.moduleId, existing);
+  }
+
+  // Fetch favorites for current user
+  const userFavorites = await db
+    .select({ moduleId: moduleFavorites.moduleId })
+    .from(moduleFavorites)
+    .where(and(inArray(moduleFavorites.moduleId, moduleIds), eq(moduleFavorites.userId, user.id)));
+
+  const favModuleIds = new Set(userFavorites.map((f) => f.moduleId));
+
+  // Fetch links for all modules
+  const allLinks = await db.select().from(moduleLinks).where(inArray(moduleLinks.moduleId, moduleIds));
+
+  const linksByModule = new Map<string, typeof allLinks>();
+  for (const link of allLinks) {
+    const existing = linksByModule.get(link.moduleId) || [];
+    existing.push(link);
+    linksByModule.set(link.moduleId, existing);
+  }
+
+  // Compute issue statistics per module
+  // Join module_issues -> issues -> states to count by state group
+  const issueStats = await db
+    .select({
+      moduleId: moduleIssues.moduleId,
+      stateGroup: states.group,
+      issueCount: count(),
+    })
+    .from(moduleIssues)
+    .innerJoin(issues, eq(moduleIssues.issueId, issues.id))
+    .innerJoin(states, eq(issues.stateId, states.id))
+    .where(
+      and(
+        inArray(moduleIssues.moduleId, moduleIds),
+        isNull(issues.archivedAt),
+        isNull(issues.deletedAt)
+      )
+    )
+    .groupBy(moduleIssues.moduleId, states.group);
+
+  // Build stats map: moduleId -> { total, completed, cancelled, started, unstarted, backlog }
+  const statsMap = new Map<
+    string,
+    { total: number; completed: number; cancelled: number; started: number; unstarted: number; backlog: number }
+  >();
+
+  for (const row of issueStats) {
+    const existing = statsMap.get(row.moduleId) || {
+      total: 0,
+      completed: 0,
+      cancelled: 0,
+      started: 0,
+      unstarted: 0,
+      backlog: 0,
+    };
+    const cnt = Number(row.issueCount);
+    existing.total += cnt;
+    switch (row.stateGroup) {
+      case "completed":
+        existing.completed += cnt;
+        break;
+      case "cancelled":
+        existing.cancelled += cnt;
+        break;
+      case "started":
+        existing.started += cnt;
+        break;
+      case "unstarted":
+        existing.unstarted += cnt;
+        break;
+      case "backlog":
+        existing.backlog += cnt;
+        break;
+    }
+    statsMap.set(row.moduleId, existing);
+  }
+
+  // Format response matching Django's ModuleSerializer
+  const result = allModules.map((m) => {
+    const stats = statsMap.get(m.id) || {
+      total: 0,
+      completed: 0,
+      cancelled: 0,
+      started: 0,
+      unstarted: 0,
+      backlog: 0,
+    };
+
+    return {
+      id: m.id,
+      workspace_id: m.workspaceId,
+      project_id: m.projectId,
+      name: m.name,
+      description: m.description ?? "",
+      description_text: m.descriptionText ?? null,
+      description_html: m.descriptionHtml ?? null,
+      start_date: m.startDate?.toISOString().split("T")[0] ?? null,
+      target_date: m.targetDate?.toISOString().split("T")[0] ?? null,
+      status: m.status ?? "backlog",
+      lead_id: m.leadId ?? null,
+      member_ids: membersByModule.get(m.id) || [],
+      view_props: m.viewProps ?? {},
+      sort_order: m.sortOrder ?? 65535,
+      is_favorite: favModuleIds.has(m.id),
+      total_issues: stats.total,
+      completed_issues: stats.completed,
+      cancelled_issues: stats.cancelled,
+      started_issues: stats.started,
+      unstarted_issues: stats.unstarted,
+      backlog_issues: stats.backlog,
+      created_at: m.createdAt?.toISOString() ?? null,
+      updated_at: m.updatedAt?.toISOString() ?? null,
+      archived_at: m.archivedAt?.toISOString() ?? null,
+      link_module: (linksByModule.get(m.id) || []).map((link) => ({
+        id: link.id,
+        module_id: link.moduleId,
+        title: link.title ?? "",
+        url: link.url,
+        metadata: link.metadata ?? {},
+        created_by_id: link.createdById ?? null,
+        created_at: link.createdAt?.toISOString() ?? null,
+      })),
+    };
+  });
+
+  return c.json(result);
 });
 
-// Views
+// Views - LIST
 workspaceRoutes.get("/:slug/views/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  const membership = c.get("workspaceMembership");
+  if (!workspace || !user || !membership) return c.json({ detail: "Not found." }, 404);
+
+  // Get workspace-level views (project is null)
+  // Guests only see their own views; others see own + public (accessLevel=1)
+  const isGuest = membership.role === ROLES.GUEST;
+
+  // Support order_by query param (default: -created_at)
+  const orderByParam = c.req.query("order_by") ?? "-created_at";
+  const isDescending = orderByParam.startsWith("-");
+  const orderField = orderByParam.replace(/^-/, "");
+  const orderMap: Record<string, any> = {
+    created_at: views.createdAt,
+    updated_at: views.updatedAt,
+    name: views.name,
+    sort_order: views.sortOrder,
+  };
+  const orderCol = orderMap[orderField] ?? views.createdAt;
+  const orderDir = isDescending ? desc(orderCol) : asc(orderCol);
+
+  const allViews = await db.query.views.findMany({
+    where: and(
+      eq(views.workspaceId, workspace.id),
+      isNull(views.projectId)
+    ),
+    orderBy: [orderDir],
+  });
+
+  const filtered = isGuest
+    ? allViews.filter((v) => v.ownedById === user.id)
+    : allViews.filter((v) => v.ownedById === user.id || v.accessLevel === 1);
+
+  // Get favorites for current user
+  const userFavorites = await db
+    .select({ viewId: viewFavorites.viewId })
+    .from(viewFavorites)
+    .where(eq(viewFavorites.userId, user.id));
+  const favSet = new Set(userFavorites.map((f) => f.viewId));
+
+  const result = filtered.map((v) => ({
+    id: v.id,
+    workspace: workspace.id,
+    project: v.projectId,
+    name: v.name,
+    description: v.description ?? "",
+    query: v.query ?? {},
+    query_data: v.queryData ?? {},
+    filters: v.filtersData ?? {},
+    display_filters: v.displayFilters ?? {},
+    display_properties: v.displayProperties ?? {},
+    access: v.accessLevel ?? 1,
+    sort_order: v.sortOrder ?? 65535,
+    is_locked: v.isLocked ?? false,
+    is_favorite: favSet.has(v.id),
+    owned_by: v.ownedById,
+    created_at: v.createdAt?.toISOString() ?? null,
+    updated_at: v.updatedAt?.toISOString() ?? null,
+  }));
+
+  return c.json(result);
+});
+
+// Views - CREATE
+workspaceRoutes.post(
+  "/:slug/views/",
+  zValidator(
+    "json",
+    z.object({
+      name: z.string().min(1),
+      description: z.string().optional().default(""),
+      query: z.any().optional().default({}),
+      query_data: z.any().optional().default({}),
+      filters: z.any().optional().default({}),
+      display_filters: z.any().optional().default({}),
+      display_properties: z.any().optional().default({}),
+      access: z.number().int().min(0).max(2).optional().default(1),
+      sort_order: z.number().optional(),
+      is_locked: z.boolean().optional().default(false),
+    })
+  ),
+  async (c) => {
+    const workspace = c.get("workspace");
+    const user = c.get("user");
+    if (!workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+    const body = c.req.valid("json");
+
+    // Auto-calculate sort_order if not provided (Django: max + 10000)
+    let sortOrder = body.sort_order;
+    if (sortOrder === undefined) {
+      const maxResult = await db
+        .select({ largest: max(views.sortOrder) })
+        .from(views)
+        .where(
+          and(
+            eq(views.workspaceId, workspace.id),
+            isNull(views.projectId)
+          )
+        );
+      const largest = maxResult[0]?.largest;
+      sortOrder = largest != null ? largest + 10000 : 65535;
+    }
+
+    const [created] = await db
+      .insert(views)
+      .values({
+        workspaceId: workspace.id,
+        name: body.name,
+        description: body.description,
+        query: body.query,
+        queryData: body.query_data,
+        filtersData: body.filters,
+        displayFilters: body.display_filters,
+        displayProperties: body.display_properties,
+        accessLevel: body.access,
+        sortOrder,
+        isLocked: body.is_locked,
+        ownedById: user.id,
+      })
+      .returning();
+
+    return c.json(
+      {
+        id: created.id,
+        workspace: workspace.id,
+        project: null,
+        name: created.name,
+        description: created.description ?? "",
+        query: created.query ?? {},
+        query_data: created.queryData ?? {},
+        filters: created.filtersData ?? {},
+        display_filters: created.displayFilters ?? {},
+        display_properties: created.displayProperties ?? {},
+        access: created.accessLevel ?? 1,
+        sort_order: created.sortOrder ?? 65535,
+        is_locked: created.isLocked ?? false,
+        is_favorite: false,
+        owned_by: created.ownedById,
+        created_at: created.createdAt?.toISOString() ?? null,
+        updated_at: created.updatedAt?.toISOString() ?? null,
+      },
+      201
+    );
+  }
+);
+
+// Views - RETRIEVE
+workspaceRoutes.get("/:slug/views/:viewId/", async (c) => {
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const viewId = c.req.param("viewId");
+
+  const view = await db.query.views.findFirst({
+    where: and(
+      eq(views.id, viewId),
+      eq(views.workspaceId, workspace.id),
+      isNull(views.projectId)
+    ),
+  });
+
+  if (!view) return c.json({ detail: "Not found." }, 404);
+
+  // Check if user favorited this view
+  const fav = await db.query.viewFavorites.findFirst({
+    where: and(
+      eq(viewFavorites.viewId, view.id),
+      eq(viewFavorites.userId, user.id)
+    ),
+  });
+
+  return c.json({
+    id: view.id,
+    workspace: workspace.id,
+    project: view.projectId,
+    name: view.name,
+    description: view.description ?? "",
+    query: view.query ?? {},
+    query_data: view.queryData ?? {},
+    filters: view.filtersData ?? {},
+    display_filters: view.displayFilters ?? {},
+    display_properties: view.displayProperties ?? {},
+    access: view.accessLevel ?? 1,
+    sort_order: view.sortOrder ?? 65535,
+    is_locked: view.isLocked ?? false,
+    is_favorite: !!fav,
+    owned_by: view.ownedById,
+    created_at: view.createdAt?.toISOString() ?? null,
+    updated_at: view.updatedAt?.toISOString() ?? null,
+  });
+});
+
+// Views - PARTIAL UPDATE
+workspaceRoutes.patch(
+  "/:slug/views/:viewId/",
+  zValidator(
+    "json",
+    z.object({
+      name: z.string().min(1).optional(),
+      description: z.string().optional(),
+      query: z.any().optional(),
+      query_data: z.any().optional(),
+      filters: z.any().optional(),
+      display_filters: z.any().optional(),
+      display_properties: z.any().optional(),
+      access: z.number().int().min(0).max(2).optional(),
+      sort_order: z.number().optional(),
+      is_locked: z.boolean().optional(),
+    })
+  ),
+  async (c) => {
+    const workspace = c.get("workspace");
+    const user = c.get("user");
+    if (!workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+    const viewId = c.req.param("viewId");
+
+    const view = await db.query.views.findFirst({
+      where: and(
+        eq(views.id, viewId),
+        eq(views.workspaceId, workspace.id),
+        isNull(views.projectId)
+      ),
+    });
+
+    if (!view) return c.json({ detail: "Not found." }, 404);
+
+    // Only owner can update
+    if (view.ownedById !== user.id) {
+      return c.json({ detail: "Only the owner can update this view." }, 403);
+    }
+
+    // Locked views cannot be updated (except to unlock)
+    const body = c.req.valid("json");
+    if (view.isLocked && body.is_locked !== false) {
+      return c.json({ detail: "View is locked." }, 400);
+    }
+
+    const updateData: Record<string, any> = { updatedAt: new Date() };
+    if (body.name !== undefined) updateData.name = body.name;
+    if (body.description !== undefined) updateData.description = body.description;
+    if (body.query !== undefined) updateData.query = body.query;
+    if (body.query_data !== undefined) updateData.queryData = body.query_data;
+    if (body.filters !== undefined) updateData.filtersData = body.filters;
+    if (body.display_filters !== undefined) updateData.displayFilters = body.display_filters;
+    if (body.display_properties !== undefined) updateData.displayProperties = body.display_properties;
+    if (body.access !== undefined) updateData.accessLevel = body.access;
+    if (body.sort_order !== undefined) updateData.sortOrder = body.sort_order;
+    if (body.is_locked !== undefined) updateData.isLocked = body.is_locked;
+
+    const [updated] = await db
+      .update(views)
+      .set(updateData)
+      .where(eq(views.id, viewId))
+      .returning();
+
+    const fav = await db.query.viewFavorites.findFirst({
+      where: and(
+        eq(viewFavorites.viewId, updated.id),
+        eq(viewFavorites.userId, user.id)
+      ),
+    });
+
+    return c.json({
+      id: updated.id,
+      workspace: workspace.id,
+      project: updated.projectId,
+      name: updated.name,
+      description: updated.description ?? "",
+      query: updated.query ?? {},
+      query_data: updated.queryData ?? {},
+      filters: updated.filtersData ?? {},
+      display_filters: updated.displayFilters ?? {},
+      display_properties: updated.displayProperties ?? {},
+      access: updated.accessLevel ?? 1,
+      sort_order: updated.sortOrder ?? 65535,
+      is_locked: updated.isLocked ?? false,
+      is_favorite: !!fav,
+      owned_by: updated.ownedById,
+      created_at: updated.createdAt?.toISOString() ?? null,
+      updated_at: updated.updatedAt?.toISOString() ?? null,
+    });
+  }
+);
+
+// Views - DELETE
+workspaceRoutes.delete("/:slug/views/:viewId/", async (c) => {
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  const membership = c.get("workspaceMembership");
+  if (!workspace || !user || !membership) return c.json({ detail: "Not found." }, 404);
+
+  const viewId = c.req.param("viewId");
+
+  const view = await db.query.views.findFirst({
+    where: and(
+      eq(views.id, viewId),
+      eq(views.workspaceId, workspace.id),
+      isNull(views.projectId)
+    ),
+  });
+
+  if (!view) return c.json({ detail: "Not found." }, 404);
+
+  // Only admin or owner can delete
+  const isAdmin = membership.role === ROLES.ADMIN;
+  const isOwner = view.ownedById === user.id;
+  if (!isAdmin && !isOwner) {
+    return c.json({ detail: "Only the owner or admin can delete this view." }, 403);
+  }
+
+  // Delete favorites first, then the view
+  await db.delete(viewFavorites).where(eq(viewFavorites.viewId, viewId));
+  await db.delete(views).where(eq(views.id, viewId));
+
+  return c.body(null, 204);
 });
 
 // My Issues

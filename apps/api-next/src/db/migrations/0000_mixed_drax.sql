@@ -53,6 +53,16 @@ CREATE TABLE `user_profiles` (
 	`time_format` text DEFAULT '12h',
 	`theme` text DEFAULT 'system',
 	`language` text DEFAULT 'en',
+	`last_workspace_id` text,
+	`role` text,
+	`use_case` text,
+	`onboarding_step` text DEFAULT '{"profile_complete":false,"workspace_create":false,"workspace_invite":false,"workspace_join":false}',
+	`is_tour_completed` integer DEFAULT false,
+	`is_onboarded` integer DEFAULT false,
+	`billing_address` text,
+	`billing_address_country` text DEFAULT 'INDIA',
+	`company_name` text,
+	`has_marketing_email_consent` integer DEFAULT false,
 	`created_at` integer,
 	`updated_at` integer,
 	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE cascade
@@ -71,10 +81,8 @@ CREATE TABLE `users` (
 	`cover_image` text,
 	`first_name` text,
 	`last_name` text,
-	`is_onboarded` integer DEFAULT false,
 	`is_active` integer DEFAULT true,
-	`is_tour_completed` integer DEFAULT false,
-	`onboarding_step` integer DEFAULT 0,
+	`is_password_autoset` integer DEFAULT false,
 	`created_at` integer,
 	`updated_at` integer,
 	`last_login_at` integer
@@ -97,8 +105,13 @@ CREATE TABLE `favorites` (
 	`id` text PRIMARY KEY NOT NULL,
 	`workspace_id` text NOT NULL,
 	`user_id` text NOT NULL,
+	`project_id` text,
 	`entity_type` text NOT NULL,
-	`entity_id` text NOT NULL,
+	`entity_id` text,
+	`name` text,
+	`is_folder` integer DEFAULT false,
+	`sequence` real DEFAULT 65535,
+	`parent_id` text,
 	`sort_order` real DEFAULT 65535,
 	`created_at` integer,
 	FOREIGN KEY (`workspace_id`) REFERENCES `workspaces`(`id`) ON UPDATE no action ON DELETE cascade,
@@ -139,7 +152,12 @@ CREATE TABLE `stickies` (
 	`user_id` text NOT NULL,
 	`name` text,
 	`description` text,
-	`color` text DEFAULT '#FEF3C7',
+	`description_html` text DEFAULT '<p></p>',
+	`description_stripped` text,
+	`description_binary` text,
+	`logo_props` text,
+	`color` text,
+	`background_color` text,
 	`sort_order` real DEFAULT 65535,
 	`created_at` integer,
 	`updated_at` integer,
@@ -148,6 +166,22 @@ CREATE TABLE `stickies` (
 );
 --> statement-breakpoint
 CREATE INDEX `sticky_user_workspace_idx` ON `stickies` (`user_id`,`workspace_id`);--> statement-breakpoint
+CREATE TABLE `workspace_home_preferences` (
+	`id` text PRIMARY KEY NOT NULL,
+	`workspace_id` text NOT NULL,
+	`user_id` text NOT NULL,
+	`key` text NOT NULL,
+	`is_enabled` integer DEFAULT true,
+	`config` text,
+	`sort_order` real DEFAULT 65535,
+	`created_at` integer,
+	`updated_at` integer,
+	FOREIGN KEY (`workspace_id`) REFERENCES `workspaces`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE INDEX `workspace_home_pref_user_workspace_idx` ON `workspace_home_preferences` (`user_id`,`workspace_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `workspace_home_pref_unique` ON `workspace_home_preferences` (`workspace_id`,`user_id`,`key`);--> statement-breakpoint
 CREATE TABLE `workspace_invitations` (
 	`id` text PRIMARY KEY NOT NULL,
 	`workspace_id` text NOT NULL,
@@ -187,9 +221,11 @@ CREATE TABLE `workspace_members` (
 	`workspace_id` text NOT NULL,
 	`user_id` text NOT NULL,
 	`role` integer DEFAULT 15 NOT NULL,
+	`company_role` text,
 	`is_active` integer DEFAULT true,
 	`view_props` text,
 	`default_props` text,
+	`issue_props` text,
 	`created_at` integer,
 	`updated_at` integer,
 	FOREIGN KEY (`workspace_id`) REFERENCES `workspaces`(`id`) ON UPDATE no action ON DELETE cascade,
@@ -199,6 +235,25 @@ CREATE TABLE `workspace_members` (
 CREATE INDEX `workspace_member_workspace_idx` ON `workspace_members` (`workspace_id`);--> statement-breakpoint
 CREATE INDEX `workspace_member_user_idx` ON `workspace_members` (`user_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `workspace_member_unique` ON `workspace_members` (`workspace_id`,`user_id`);--> statement-breakpoint
+CREATE TABLE `workspace_user_properties` (
+	`id` text PRIMARY KEY NOT NULL,
+	`workspace_id` text NOT NULL,
+	`user_id` text NOT NULL,
+	`filters` text,
+	`display_filters` text,
+	`display_properties` text,
+	`rich_filters` text,
+	`navigation_project_limit` integer DEFAULT 10,
+	`navigation_control_preference` text DEFAULT 'ACCORDION',
+	`product_tour` text,
+	`created_at` integer,
+	`updated_at` integer,
+	FOREIGN KEY (`workspace_id`) REFERENCES `workspaces`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE INDEX `workspace_user_prop_user_workspace_idx` ON `workspace_user_properties` (`user_id`,`workspace_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `workspace_user_prop_unique` ON `workspace_user_properties` (`workspace_id`,`user_id`);--> statement-breakpoint
 CREATE TABLE `workspaces` (
 	`id` text PRIMARY KEY NOT NULL,
 	`name` text NOT NULL,
@@ -206,6 +261,7 @@ CREATE TABLE `workspaces` (
 	`logo` text,
 	`owner_id` text NOT NULL,
 	`organization_size` text,
+	`timezone` text DEFAULT 'UTC',
 	`created_at` integer,
 	`updated_at` integer,
 	FOREIGN KEY (`owner_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
@@ -281,6 +337,27 @@ CREATE TABLE `project_members` (
 CREATE INDEX `project_member_project_idx` ON `project_members` (`project_id`);--> statement-breakpoint
 CREATE INDEX `project_member_member_idx` ON `project_members` (`member_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `project_member_unique` ON `project_members` (`project_id`,`member_id`);--> statement-breakpoint
+CREATE TABLE `project_user_properties` (
+	`id` text PRIMARY KEY NOT NULL,
+	`project_id` text NOT NULL,
+	`workspace_id` text NOT NULL,
+	`user_id` text NOT NULL,
+	`filters` text,
+	`display_filters` text,
+	`display_properties` text,
+	`rich_filters` text,
+	`preferences` text,
+	`sort_order` real DEFAULT 65535,
+	`created_at` integer,
+	`updated_at` integer,
+	FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`workspace_id`) REFERENCES `workspaces`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE INDEX `project_user_prop_project_idx` ON `project_user_properties` (`project_id`);--> statement-breakpoint
+CREATE INDEX `project_user_prop_user_idx` ON `project_user_properties` (`user_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `project_user_prop_unique` ON `project_user_properties` (`project_id`,`user_id`);--> statement-breakpoint
 CREATE TABLE `projects` (
 	`id` text PRIMARY KEY NOT NULL,
 	`workspace_id` text NOT NULL,
@@ -299,7 +376,18 @@ CREATE TABLE `projects` (
 	`default_state_id` text,
 	`project_lead_id` text,
 	`estimate_id` text,
+	`logo_props` text,
+	`cycle_view` integer DEFAULT true,
+	`module_view` integer DEFAULT true,
+	`issue_views_view` integer DEFAULT true,
+	`page_view` integer DEFAULT true,
+	`intake_view` integer DEFAULT false,
+	`guest_view_all_features` integer DEFAULT false,
+	`is_time_tracking_enabled` integer DEFAULT false,
+	`is_issue_type_enabled` integer DEFAULT false,
+	`archived_at` integer,
 	`sort_order` real DEFAULT 65535,
+	`is_member_added` integer DEFAULT false,
 	`created_by_id` text,
 	`created_at` integer,
 	`updated_at` integer,
@@ -519,6 +607,27 @@ CREATE TABLE `cycle_issues` (
 CREATE INDEX `cycle_issue_cycle_idx` ON `cycle_issues` (`cycle_id`);--> statement-breakpoint
 CREATE INDEX `cycle_issue_issue_idx` ON `cycle_issues` (`issue_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `cycle_issue_unique` ON `cycle_issues` (`cycle_id`,`issue_id`);--> statement-breakpoint
+CREATE TABLE `cycle_user_properties` (
+	`id` text PRIMARY KEY NOT NULL,
+	`cycle_id` text NOT NULL,
+	`project_id` text NOT NULL,
+	`workspace_id` text NOT NULL,
+	`user_id` text NOT NULL,
+	`filters` text,
+	`display_filters` text,
+	`display_properties` text,
+	`rich_filters` text,
+	`created_at` integer,
+	`updated_at` integer,
+	FOREIGN KEY (`cycle_id`) REFERENCES `cycles`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`workspace_id`) REFERENCES `workspaces`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE INDEX `cycle_user_prop_cycle_idx` ON `cycle_user_properties` (`cycle_id`);--> statement-breakpoint
+CREATE INDEX `cycle_user_prop_user_idx` ON `cycle_user_properties` (`user_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `cycle_user_prop_unique` ON `cycle_user_properties` (`cycle_id`,`user_id`);--> statement-breakpoint
 CREATE TABLE `cycles` (
 	`id` text PRIMARY KEY NOT NULL,
 	`project_id` text NOT NULL,
@@ -591,6 +700,27 @@ CREATE TABLE `module_members` (
 CREATE INDEX `module_member_module_idx` ON `module_members` (`module_id`);--> statement-breakpoint
 CREATE INDEX `module_member_member_idx` ON `module_members` (`member_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `module_member_unique` ON `module_members` (`module_id`,`member_id`);--> statement-breakpoint
+CREATE TABLE `module_user_properties` (
+	`id` text PRIMARY KEY NOT NULL,
+	`module_id` text NOT NULL,
+	`project_id` text NOT NULL,
+	`workspace_id` text NOT NULL,
+	`user_id` text NOT NULL,
+	`filters` text,
+	`display_filters` text,
+	`display_properties` text,
+	`rich_filters` text,
+	`created_at` integer,
+	`updated_at` integer,
+	FOREIGN KEY (`module_id`) REFERENCES `modules`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`workspace_id`) REFERENCES `workspaces`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE INDEX `module_user_prop_module_idx` ON `module_user_properties` (`module_id`);--> statement-breakpoint
+CREATE INDEX `module_user_prop_user_idx` ON `module_user_properties` (`user_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `module_user_prop_unique` ON `module_user_properties` (`module_id`,`user_id`);--> statement-breakpoint
 CREATE TABLE `modules` (
 	`id` text PRIMARY KEY NOT NULL,
 	`project_id` text NOT NULL,
@@ -743,6 +873,7 @@ CREATE TABLE `notifications` (
 	`message` text,
 	`message_html` text,
 	`message_stripped` text,
+	`sender` text DEFAULT '' NOT NULL,
 	`data` text,
 	`read_at` integer,
 	`archived_at` integer,
@@ -831,24 +962,33 @@ CREATE INDEX `job_status_queue_idx` ON `jobs` (`status`,`queue`,`run_at`);--> st
 CREATE INDEX `job_name_idx` ON `jobs` (`name`);--> statement-breakpoint
 CREATE TABLE `file_assets` (
 	`id` text PRIMARY KEY NOT NULL,
+	`attributes` text,
+	`asset` text NOT NULL,
+	`size` real DEFAULT 0,
+	`user_id` text,
 	`workspace_id` text,
+	`project_id` text,
 	`entity_type` text,
-	`entity_id` text,
-	`asset_type` text NOT NULL,
-	`file_name` text NOT NULL,
-	`file_size` integer NOT NULL,
-	`mime_type` text,
-	`storage_key` text NOT NULL,
-	`storage_provider` text DEFAULT 'local',
-	`uploaded_by_id` text,
+	`entity_identifier` text,
+	`is_uploaded` integer DEFAULT false,
+	`storage_metadata` text,
+	`is_deleted` integer DEFAULT false,
+	`deleted_at` integer,
+	`external_id` text,
+	`external_source` text,
+	`created_by_id` text,
 	`created_at` integer,
+	`updated_at` integer,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE cascade,
 	FOREIGN KEY (`workspace_id`) REFERENCES `workspaces`(`id`) ON UPDATE no action ON DELETE cascade,
-	FOREIGN KEY (`uploaded_by_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
+	FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`created_by_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
 CREATE INDEX `file_asset_workspace_idx` ON `file_assets` (`workspace_id`);--> statement-breakpoint
-CREATE INDEX `file_asset_entity_idx` ON `file_assets` (`entity_type`,`entity_id`);--> statement-breakpoint
-CREATE INDEX `file_asset_uploaded_by_idx` ON `file_assets` (`uploaded_by_id`);--> statement-breakpoint
+CREATE INDEX `file_asset_entity_idx` ON `file_assets` (`entity_type`,`entity_identifier`);--> statement-breakpoint
+CREATE INDEX `file_asset_uploaded_by_idx` ON `file_assets` (`created_by_id`);--> statement-breakpoint
+CREATE INDEX `file_asset_asset_idx` ON `file_assets` (`asset`);--> statement-breakpoint
 CREATE TABLE `github_comment_syncs` (
 	`id` text PRIMARY KEY NOT NULL,
 	`workspace_id` text NOT NULL,
@@ -925,4 +1065,50 @@ CREATE TABLE `workspace_integrations` (
 );
 --> statement-breakpoint
 CREATE INDEX `workspace_integration_workspace_idx` ON `workspace_integrations` (`workspace_id`);--> statement-breakpoint
-CREATE UNIQUE INDEX `workspace_integration_unique` ON `workspace_integrations` (`workspace_id`,`integration_id`);
+CREATE UNIQUE INDEX `workspace_integration_unique` ON `workspace_integrations` (`workspace_id`,`integration_id`);--> statement-breakpoint
+CREATE TABLE `instance_admins` (
+	`id` text PRIMARY KEY NOT NULL,
+	`instance_id` text NOT NULL,
+	`user_id` text NOT NULL,
+	`role` integer DEFAULT 20,
+	`is_verified` integer DEFAULT false,
+	`created_at` integer,
+	`updated_at` integer,
+	FOREIGN KEY (`instance_id`) REFERENCES `instances`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE TABLE `instance_configurations` (
+	`id` text PRIMARY KEY NOT NULL,
+	`key` text NOT NULL,
+	`value` text,
+	`category` text NOT NULL,
+	`is_encrypted` integer DEFAULT false,
+	`created_at` integer,
+	`updated_at` integer
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `instance_configurations_key_unique` ON `instance_configurations` (`key`);--> statement-breakpoint
+CREATE TABLE `instances` (
+	`id` text PRIMARY KEY NOT NULL,
+	`instance_name` text,
+	`whitelist_emails` text,
+	`instance_id` text,
+	`current_version` text,
+	`latest_version` text,
+	`edition` text DEFAULT 'PLANE_COMMUNITY',
+	`domain` text,
+	`last_checked_at` integer,
+	`namespace` text,
+	`is_telemetry_enabled` integer DEFAULT true,
+	`is_support_required` integer DEFAULT true,
+	`is_setup_done` integer DEFAULT false,
+	`is_signup_screen_visited` integer DEFAULT false,
+	`is_verified` integer DEFAULT false,
+	`is_test` integer DEFAULT false,
+	`is_current_version_deprecated` integer DEFAULT false,
+	`created_at` integer,
+	`updated_at` integer
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `instances_instance_id_unique` ON `instances` (`instance_id`);

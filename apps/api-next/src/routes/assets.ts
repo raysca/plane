@@ -135,7 +135,7 @@ workspaceAssetRoutes.post("/", zValidator("json", createAssetSchema), async (c) 
 
   // Generate presigned upload URL
   const storage = getStorage();
-  const uploadData = storage.generatePresignedUpload(assetKey, type, sizeLimit);
+  const uploadData = await storage.generatePresignedUpload(assetKey, type, sizeLimit);
 
   const assetUrl = getAssetUrl(entity_type, assetId, workspace.slug);
 
@@ -329,7 +329,7 @@ projectAssetRoutes.post("/", zValidator("json", createAssetSchema), async (c) =>
   });
 
   const storage = getStorage();
-  const uploadData = storage.generatePresignedUpload(assetKey, type, sizeLimit);
+  const uploadData = await storage.generatePresignedUpload(assetKey, type, sizeLimit);
   const assetUrl = getAssetUrl(entity_type, assetId, workspace.slug, projectId);
 
   return c.json({
@@ -526,7 +526,7 @@ userAssetRoutes.post("/", zValidator("json", createUserAssetSchema), async (c) =
   });
 
   const storage = getStorage();
-  const uploadData = storage.generatePresignedUpload(assetKey, type, sizeLimit);
+  const uploadData = await storage.generatePresignedUpload(assetKey, type, sizeLimit);
   const assetUrl = `/api/assets/v2/static/${assetId}/`;
 
   return c.json({
@@ -589,14 +589,30 @@ userAssetRoutes.delete("/:assetId", async (c) => {
 
 const localAssetRoutes = new Hono<{ Variables: Variables }>();
 
-// PUT /api/assets/v2/upload/:key — Direct file upload for local storage
-localAssetRoutes.put("/upload/*", async (c) => {
+// POST /api/assets/v2/upload/:key — FormData file upload for local storage
+// The frontend sends multipart/form-data with fields (Content-Type, key) + file
+localAssetRoutes.post("/upload/*", async (c) => {
   if (isS3Configured()) {
     return c.json({ error: "Local upload not available when S3 is configured." }, 400);
   }
 
   const key = c.req.path.replace("/api/assets/v2/upload/", "");
-  const body = await c.req.blob();
+  const contentType = c.req.header("content-type") || "";
+
+  let fileData: Blob;
+
+  if (contentType.includes("multipart/form-data")) {
+    // Frontend sends FormData with fields + file (matching S3 POST behavior)
+    const formData = await c.req.formData();
+    const file = formData.get("file");
+    if (!file || !(file instanceof Blob)) {
+      return c.json({ error: "No file provided." }, 400);
+    }
+    fileData = file;
+  } else {
+    // Fallback: raw body upload
+    fileData = await c.req.blob();
+  }
 
   const uploadDir = process.env.UPLOAD_DIR || join(process.cwd(), "uploads");
   const filePath = join(uploadDir, decodeURIComponent(key));
@@ -608,7 +624,7 @@ localAssetRoutes.put("/upload/*", async (c) => {
     mkdirSync(dir, { recursive: true });
   } catch { }
 
-  await Bun.write(filePath, body);
+  await Bun.write(filePath, fileData);
 
   return c.json({ status: "ok" });
 });

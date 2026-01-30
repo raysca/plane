@@ -15,6 +15,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.978.0",
+    "@aws-sdk/s3-presigned-post": "^3.978.0",
     "@hono/zod-validator": "^0.7.6",
     "@libsql/client": "^0.17.0",
     "@paralleldrive/cuid2": "^2.2.2",

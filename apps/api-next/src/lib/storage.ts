@@ -1,4 +1,6 @@
-import { S3Client } from "bun";
+import { S3Client as BunS3Client } from "bun";
+import { S3Client as AwsS3Client } from "@aws-sdk/client-s3";
+import { createPresignedPost } from "@aws-sdk/s3-presigned-post";
 import { join } from "path";
 
 const FILE_SIZE_LIMIT = 5 * 1024 * 1024; // 5MB
@@ -30,13 +32,12 @@ function getUploadDir(): string {
 
 export interface PresignedUploadData {
   url: string;
-  method: "PUT" | "POST";
-  headers?: Record<string, string>;
+  fields: Record<string, string>;
 }
 
 export interface StorageProvider {
-  /** Generate a presigned URL for uploading a file */
-  generatePresignedUpload(objectKey: string, fileType: string, fileSize: number): PresignedUploadData;
+  /** Generate a presigned POST URL with form fields for uploading a file */
+  generatePresignedUpload(objectKey: string, fileType: string, fileSize: number): Promise<PresignedUploadData>;
   /** Generate a presigned URL for downloading/viewing a file */
   generatePresignedUrl(objectKey: string, disposition?: "inline" | "attachment", filename?: string): string;
   /** Get object metadata (size, content type, etc.) */
@@ -49,24 +50,40 @@ export interface StorageProvider {
   exists(objectKey: string): Promise<boolean>;
 }
 
-/** S3-backed storage using Bun's built-in S3Client */
+/** S3-backed storage using AWS SDK for presigned POST and Bun S3Client for other operations */
 class S3StorageProvider implements StorageProvider {
   private opts: ReturnType<typeof getS3Options>;
   private expiresIn: number;
+  private awsClient: AwsS3Client;
 
   constructor() {
     this.opts = getS3Options();
     this.expiresIn = parseInt(process.env.SIGNED_URL_EXPIRATION || "3600", 10);
+    this.awsClient = new AwsS3Client({
+      region: this.opts.region,
+      credentials: {
+        accessKeyId: this.opts.accessKeyId,
+        secretAccessKey: this.opts.secretAccessKey,
+      },
+      ...(this.opts.endpoint ? { endpoint: this.opts.endpoint, forcePathStyle: true } : {}),
+    });
   }
 
-  generatePresignedUpload(objectKey: string, fileType: string, _fileSize: number): PresignedUploadData {
-    const url = S3Client.presign(objectKey, {
-      ...this.opts,
-      method: "PUT",
-      expiresIn: this.expiresIn,
-      type: fileType,
+  async generatePresignedUpload(objectKey: string, fileType: string, fileSize: number): Promise<PresignedUploadData> {
+    const { url, fields } = await createPresignedPost(this.awsClient, {
+      Bucket: this.opts.bucket,
+      Key: objectKey,
+      Conditions: [
+        ["content-length-range", 0, fileSize],
+        ["eq", "$Content-Type", fileType],
+      ],
+      Fields: {
+        "Content-Type": fileType,
+      },
+      Expires: this.expiresIn,
     });
-    return { url, method: "PUT", headers: { "Content-Type": fileType } };
+
+    return { url, fields };
   }
 
   generatePresignedUrl(objectKey: string, disposition: "inline" | "attachment" = "inline", filename?: string): string {
@@ -74,7 +91,7 @@ class S3StorageProvider implements StorageProvider {
       ? `${disposition}; filename*=UTF-8''${encodeURIComponent(filename)}`
       : disposition;
 
-    return S3Client.presign(objectKey, {
+    return BunS3Client.presign(objectKey, {
       ...this.opts,
       method: "GET",
       expiresIn: this.expiresIn,
@@ -84,7 +101,7 @@ class S3StorageProvider implements StorageProvider {
 
   async getObjectMetadata(objectKey: string): Promise<Record<string, unknown> | null> {
     try {
-      const stat = await S3Client.stat(objectKey, this.opts);
+      const stat = await BunS3Client.stat(objectKey, this.opts);
       return {
         size: stat.size,
         type: stat.type,
@@ -98,7 +115,7 @@ class S3StorageProvider implements StorageProvider {
 
   async writeFile(objectKey: string, data: Blob | ArrayBuffer | string, contentType?: string): Promise<boolean> {
     try {
-      await S3Client.write(objectKey, data, {
+      await BunS3Client.write(objectKey, data, {
         ...this.opts,
         ...(contentType ? { type: contentType } : {}),
       });
@@ -110,7 +127,7 @@ class S3StorageProvider implements StorageProvider {
 
   async deleteFile(objectKey: string): Promise<boolean> {
     try {
-      await S3Client.unlink(objectKey, this.opts);
+      await BunS3Client.unlink(objectKey, this.opts);
       return true;
     } catch {
       return false;
@@ -119,7 +136,7 @@ class S3StorageProvider implements StorageProvider {
 
   async exists(objectKey: string): Promise<boolean> {
     try {
-      await S3Client.stat(objectKey, this.opts);
+      await BunS3Client.stat(objectKey, this.opts);
       return true;
     } catch {
       return false;
@@ -137,13 +154,19 @@ class LocalStorageProvider implements StorageProvider {
     this.baseUrl = process.env.APP_BASE_URL || `http://localhost:${process.env.PORT || 8000}`;
   }
 
-  generatePresignedUpload(objectKey: string, fileType: string, _fileSize: number): PresignedUploadData {
-    // For local storage, the client uploads directly to our API
+  async generatePresignedUpload(objectKey: string, fileType: string, _fileSize: number): Promise<PresignedUploadData> {
+    // For local storage, the client POSTs FormData to our upload endpoint
     const url = `${this.baseUrl}/api/assets/v2/upload/${encodeURIComponent(objectKey)}`;
-    return { url, method: "PUT", headers: { "Content-Type": fileType } };
+    return {
+      url,
+      fields: {
+        "Content-Type": fileType,
+        key: objectKey,
+      },
+    };
   }
 
-  generatePresignedUrl(objectKey: string, disposition: "inline" | "attachment" = "inline", _filename?: string): string {
+  generatePresignedUrl(objectKey: string, _disposition: "inline" | "attachment" = "inline", _filename?: string): string {
     return `${this.baseUrl}/api/assets/v2/local/${encodeURIComponent(objectKey)}`;
   }
 

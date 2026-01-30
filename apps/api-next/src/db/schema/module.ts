@@ -196,3 +196,94 @@ export const moduleLinksRelations = relations(moduleLinks, ({ one }) => ({
     references: [users.id],
   }),
 }));
+
+// --- Default Props for Module User Properties ---
+const defaultFilters = {
+  priority: null,
+  state: null,
+  state_group: null,
+  assignees: null,
+  created_by: null,
+  labels: null,
+  start_date: null,
+  target_date: null,
+  subscriber: null,
+};
+
+const defaultDisplayFilters = {
+  group_by: null,
+  order_by: "-created_at",
+  type: null,
+  sub_issue: true,
+  show_empty_groups: true,
+  layout: "list",
+  calendar_date_range: "",
+};
+
+const defaultDisplayProperties = {
+  assignee: true,
+  attachment_count: true,
+  created_on: true,
+  due_date: true,
+  estimate: true,
+  key: true,
+  labels: true,
+  link: true,
+  priority: true,
+  start_date: true,
+  state: true,
+  sub_issue_count: true,
+  updated_on: true,
+};
+
+// Module User Properties (per-user display settings for a module)
+export const moduleUserProperties = sqliteTable(
+  "module_user_properties",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    moduleId: text("module_id")
+      .notNull()
+      .references(() => modules.id, { onDelete: "cascade" }),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    filters: text("filters", { mode: "json" }).$defaultFn(() => defaultFilters),
+    displayFilters: text("display_filters", { mode: "json" }).$defaultFn(() => defaultDisplayFilters),
+    displayProperties: text("display_properties", { mode: "json" }).$defaultFn(() => defaultDisplayProperties),
+    richFilters: text("rich_filters", { mode: "json" }).$defaultFn(() => ({})),
+    createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+  },
+  (table) => [
+    unique("module_user_prop_unique").on(table.moduleId, table.userId),
+    index("module_user_prop_module_idx").on(table.moduleId),
+    index("module_user_prop_user_idx").on(table.userId),
+  ]
+);
+
+export const moduleUserPropertiesRelations = relations(moduleUserProperties, ({ one }) => ({
+  module: one(modules, {
+    fields: [moduleUserProperties.moduleId],
+    references: [modules.id],
+  }),
+  project: one(projects, {
+    fields: [moduleUserProperties.projectId],
+    references: [projects.id],
+  }),
+  workspace: one(workspaces, {
+    fields: [moduleUserProperties.workspaceId],
+    references: [workspaces.id],
+  }),
+  user: one(users, {
+    fields: [moduleUserProperties.userId],
+    references: [users.id],
+  }),
+}));

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { eq, and, desc, asc, isNull, inArray, sql, count as countFn } from "drizzle-orm";
+import { eq, and, desc, asc, isNull, inArray, sql, count as countFn, max, like } from "drizzle-orm";
 import { db } from "../../db";
 import { users } from "../../db/schema/user";
 import {
@@ -11,8 +11,11 @@ import {
   labels,
   estimates,
   estimatePoints,
+  projectUserProperties,
 } from "../../db/schema/project";
 import { workspaces, workspaceMembers, favorites, recentVisits } from "../../db/schema/workspace";
+import { cycles, cycleUserProperties } from "../../db/schema/cycle";
+import { modules, moduleUserProperties } from "../../db/schema/module";
 import { authMiddleware, ROLES } from "../../middleware/auth";
 import {
   workspaceMiddleware,
@@ -994,6 +997,33 @@ projectRoutes.delete("/:projectId/members/:memberId/", requireProjectAdmin, asyn
   return new Response(null, { status: 204 });
 });
 
+// GET /:projectId/project-members/me/ - Get current user's membership (Django-compatible URL)
+// Matches Django's ProjectMemberUserEndpoint
+projectRoutes.get("/:projectId/project-members/me/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !user || !workspace) return c.json({ detail: "Not found." }, 404);
+
+  const membership = await db.query.projectMembers.findFirst({
+    where: and(
+      eq(projectMembers.projectId, project.id),
+      eq(projectMembers.memberId, user.id),
+      eq(projectMembers.isActive, true)
+    ),
+  });
+
+  if (!membership) {
+    return c.json({ detail: "Project Member not found." }, 404);
+  }
+
+  const dbUser = await db.query.users.findFirst({
+    where: eq(users.id, user.id),
+  });
+
+  return c.json(formatMember(membership, dbUser!));
+});
+
 // =====================================================
 // 4.3 Project States
 // =====================================================
@@ -1155,12 +1185,28 @@ projectRoutes.post("/:projectId/states/:stateId/mark-default/", requireProjectMe
   return c.json(formatState(updated!));
 });
 
+// GET /:projectId/intake-state/ - Get triage state for project
+projectRoutes.get("/:projectId/intake-state/", async (c) => {
+  const project = c.get("project");
+  if (!project) return c.json({ detail: "Not found." }, 404);
+
+  const state = await db.query.states.findFirst({
+    where: and(eq(states.projectId, project.id), eq(states.group, "triage")),
+  });
+
+  if (!state) {
+    return c.json({ error: "Triage state not found" }, 404);
+  }
+
+  return c.json(formatState(state));
+});
+
 // =====================================================
 // 4.4 Project Labels
 // =====================================================
 
-// GET /:projectId/labels/ - List labels
-projectRoutes.get("/:projectId/labels/", async (c) => {
+// Label CRUD handler functions (shared between /labels/ and /issue-labels/ paths)
+async function handleListLabels(c: any) {
   const project = c.get("project");
   if (!project) return c.json({ detail: "Not found." }, 404);
 
@@ -1170,10 +1216,9 @@ projectRoutes.get("/:projectId/labels/", async (c) => {
   });
 
   return c.json(labelList.map(formatLabel));
-});
+}
 
-// POST /:projectId/labels/ - Create label
-projectRoutes.post("/:projectId/labels/", requireProjectMember, zValidator("json", createLabelSchema), async (c) => {
+async function handleCreateLabel(c: any) {
   const project = c.get("project");
   const workspace = c.get("workspace");
   const user = c.get("user");
@@ -1181,25 +1226,53 @@ projectRoutes.post("/:projectId/labels/", requireProjectMember, zValidator("json
 
   const body = c.req.valid("json");
 
-  const result = await db
-    .insert(labels)
-    .values({
-      projectId: project.id,
-      workspaceId: workspace.id,
-      name: body.name,
-      color: body.color ?? "#000000",
-      description: body.description,
-      parentId: body.parent_id,
-      sortOrder: body.sort_order ?? 65535,
-      createdById: user.id,
-    })
-    .returning();
+  // Case-insensitive name uniqueness check per project
+  const existing = await db.query.labels.findFirst({
+    where: and(
+      eq(labels.projectId, project.id),
+      sql`LOWER(${labels.name}) = LOWER(${body.name})`
+    ),
+  });
+  if (existing) {
+    return c.json({ error: "Label with the same name already exists in the project" }, 400);
+  }
 
-  return c.json(formatLabel(result[0]!), 201);
-});
+  // Auto-calculate sort_order if not provided (max + 10000)
+  let sortOrder = body.sort_order;
+  if (sortOrder === undefined) {
+    const maxResult = await db
+      .select({ largest: max(labels.sortOrder) })
+      .from(labels)
+      .where(eq(labels.projectId, project.id));
+    const largest = maxResult[0]?.largest;
+    sortOrder = largest != null ? largest + 10000 : 65535;
+  }
 
-// PATCH /:projectId/labels/:labelId/ - Update label
-projectRoutes.patch("/:projectId/labels/:labelId/", requireProjectMember, zValidator("json", updateLabelSchema), async (c) => {
+  try {
+    const result = await db
+      .insert(labels)
+      .values({
+        projectId: project.id,
+        workspaceId: workspace.id,
+        name: body.name,
+        color: body.color ?? "#000000",
+        description: body.description,
+        parentId: body.parent_id,
+        sortOrder,
+        createdById: user.id,
+      })
+      .returning();
+
+    return c.json(formatLabel(result[0]!), 201);
+  } catch (err: any) {
+    if (err?.message?.includes("UNIQUE") || err?.code === "SQLITE_CONSTRAINT_UNIQUE") {
+      return c.json({ error: "Label with the same name already exists in the project" }, 400);
+    }
+    throw err;
+  }
+}
+
+async function handleUpdateLabel(c: any) {
   const project = c.get("project");
   if (!project) return c.json({ detail: "Not found." }, 404);
 
@@ -1212,6 +1285,21 @@ projectRoutes.patch("/:projectId/labels/:labelId/", requireProjectMember, zValid
   if (!label) return c.json({ detail: "Label not found." }, 404);
 
   const body = c.req.valid("json");
+
+  // Case-insensitive name uniqueness check (excluding current label)
+  if (body.name !== undefined) {
+    const existing = await db.query.labels.findFirst({
+      where: and(
+        eq(labels.projectId, project.id),
+        sql`LOWER(${labels.name}) = LOWER(${body.name})`,
+        sql`${labels.id} != ${labelId}`
+      ),
+    });
+    if (existing) {
+      return c.json({ error: "Label with the same name already exists in the project" }, 400);
+    }
+  }
+
   const updateData: Record<string, unknown> = { updatedAt: new Date() };
 
   if (body.name !== undefined) updateData.name = body.name;
@@ -1227,10 +1315,9 @@ projectRoutes.patch("/:projectId/labels/:labelId/", requireProjectMember, zValid
   });
 
   return c.json(formatLabel(updated!));
-});
+}
 
-// DELETE /:projectId/labels/:labelId/ - Delete label
-projectRoutes.delete("/:projectId/labels/:labelId/", requireProjectMember, async (c) => {
+async function handleDeleteLabel(c: any) {
   const project = c.get("project");
   if (!project) return c.json({ detail: "Not found." }, 404);
 
@@ -1244,8 +1331,26 @@ projectRoutes.delete("/:projectId/labels/:labelId/", requireProjectMember, async
 
   await db.delete(labels).where(eq(labels.id, labelId));
 
-  return new Response(null, { status: 204 });
-});
+  return c.body(null, 204);
+}
+
+// GET /:projectId/labels/ - List labels
+projectRoutes.get("/:projectId/labels/", handleListLabels);
+
+// POST /:projectId/labels/ - Create label
+projectRoutes.post("/:projectId/labels/", requireProjectMember, zValidator("json", createLabelSchema), handleCreateLabel);
+
+// PATCH /:projectId/labels/:labelId/ - Update label
+projectRoutes.patch("/:projectId/labels/:labelId/", requireProjectMember, zValidator("json", updateLabelSchema), handleUpdateLabel);
+
+// DELETE /:projectId/labels/:labelId/ - Delete label
+projectRoutes.delete("/:projectId/labels/:labelId/", requireProjectMember, handleDeleteLabel);
+
+// Frontend uses /issue-labels/ path — alias routes
+projectRoutes.get("/:projectId/issue-labels/", handleListLabels);
+projectRoutes.post("/:projectId/issue-labels/", requireProjectMember, zValidator("json", createLabelSchema), handleCreateLabel);
+projectRoutes.patch("/:projectId/issue-labels/:labelId/", requireProjectMember, zValidator("json", updateLabelSchema), handleUpdateLabel);
+projectRoutes.delete("/:projectId/issue-labels/:labelId/", requireProjectMember, handleDeleteLabel);
 
 // =====================================================
 // 4.5 Project Estimates
@@ -1471,5 +1576,344 @@ projectRoutes.delete("/:projectId/estimates/:estimateId/points/:pointId/", requi
 
   return new Response(null, { status: 204 });
 });
+
+// =====================================================
+// 4.6 Project User Properties
+// =====================================================
+
+const updateProjectUserPropertiesSchema = z.object({
+  filters: z.record(z.string(), z.any()).optional(),
+  display_filters: z.record(z.string(), z.any()).optional(),
+  display_properties: z.record(z.string(), z.any()).optional(),
+  rich_filters: z.record(z.string(), z.any()).optional(),
+  preferences: z.record(z.string(), z.any()).optional(),
+  sort_order: z.number().optional(),
+});
+
+function formatProjectUserProperties(p: typeof projectUserProperties.$inferSelect) {
+  return {
+    id: p.id,
+    project: p.projectId,
+    workspace: p.workspaceId,
+    user: p.userId,
+    filters: p.filters ?? {},
+    display_filters: p.displayFilters ?? {},
+    display_properties: p.displayProperties ?? {},
+    rich_filters: p.richFilters ?? {},
+    preferences: p.preferences ?? { pages: { block_display: true }, navigation: { default_tab: "work_items", hide_in_more_menu: [] } },
+    sort_order: p.sortOrder ?? 65535,
+    created_at: p.createdAt?.toISOString() ?? null,
+    updated_at: p.updatedAt?.toISOString() ?? null,
+  };
+}
+
+// GET /:projectId/user-properties/ - Get or create user properties for project
+projectRoutes.get("/:projectId/user-properties/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  // Find or create
+  let props = await db.query.projectUserProperties.findFirst({
+    where: and(
+      eq(projectUserProperties.projectId, project.id),
+      eq(projectUserProperties.userId, user.id)
+    ),
+  });
+
+  if (!props) {
+    const [created] = await db.insert(projectUserProperties).values({
+      projectId: project.id,
+      workspaceId: workspace.id,
+      userId: user.id,
+    }).returning();
+    props = created;
+  }
+
+  return c.json(formatProjectUserProperties(props!));
+});
+
+// PATCH /:projectId/user-properties/ - Update user properties for project
+projectRoutes.patch(
+  "/:projectId/user-properties/",
+  zValidator("json", updateProjectUserPropertiesSchema),
+  async (c) => {
+    const project = c.get("project");
+    const workspace = c.get("workspace");
+    const user = c.get("user");
+    if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+    // Find or create
+    let props = await db.query.projectUserProperties.findFirst({
+      where: and(
+        eq(projectUserProperties.projectId, project.id),
+        eq(projectUserProperties.userId, user.id)
+      ),
+    });
+
+    if (!props) {
+      const [created] = await db.insert(projectUserProperties).values({
+        projectId: project.id,
+        workspaceId: workspace.id,
+        userId: user.id,
+      }).returning();
+      props = created;
+    }
+
+    const body = c.req.valid("json");
+    const updateData: Record<string, any> = { updatedAt: new Date() };
+
+    if (body.filters !== undefined) updateData.filters = body.filters;
+    if (body.display_filters !== undefined) updateData.displayFilters = body.display_filters;
+    if (body.display_properties !== undefined) updateData.displayProperties = body.display_properties;
+    if (body.rich_filters !== undefined) updateData.richFilters = body.rich_filters;
+    if (body.preferences !== undefined) updateData.preferences = body.preferences;
+    if (body.sort_order !== undefined) updateData.sortOrder = body.sort_order;
+
+    await db.update(projectUserProperties)
+      .set(updateData)
+      .where(eq(projectUserProperties.id, props!.id));
+
+    const updated = await db.query.projectUserProperties.findFirst({
+      where: eq(projectUserProperties.id, props!.id),
+    });
+
+    return c.json(formatProjectUserProperties(updated!));
+  }
+);
+
+// =====================================================
+// 4.7 Cycle User Properties
+// =====================================================
+
+const updateCycleUserPropertiesSchema = z.object({
+  filters: z.record(z.string(), z.any()).optional(),
+  display_filters: z.record(z.string(), z.any()).optional(),
+  display_properties: z.record(z.string(), z.any()).optional(),
+  rich_filters: z.record(z.string(), z.any()).optional(),
+});
+
+function formatCycleUserProperties(p: typeof cycleUserProperties.$inferSelect) {
+  return {
+    id: p.id,
+    cycle: p.cycleId,
+    project: p.projectId,
+    workspace: p.workspaceId,
+    user: p.userId,
+    filters: p.filters ?? {},
+    display_filters: p.displayFilters ?? {},
+    display_properties: p.displayProperties ?? {},
+    rich_filters: p.richFilters ?? {},
+    created_at: p.createdAt?.toISOString() ?? null,
+    updated_at: p.updatedAt?.toISOString() ?? null,
+  };
+}
+
+// GET /:projectId/cycles/:cycleId/user-properties/
+projectRoutes.get("/:projectId/cycles/:cycleId/user-properties/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const cycleId = c.req.param("cycleId");
+
+  // Verify cycle exists in this project
+  const cycle = await db.query.cycles.findFirst({
+    where: and(eq(cycles.id, cycleId), eq(cycles.projectId, project.id)),
+  });
+  if (!cycle) return c.json({ detail: "Cycle not found." }, 404);
+
+  // Find or create
+  let props = await db.query.cycleUserProperties.findFirst({
+    where: and(
+      eq(cycleUserProperties.cycleId, cycleId),
+      eq(cycleUserProperties.userId, user.id)
+    ),
+  });
+
+  if (!props) {
+    const [created] = await db.insert(cycleUserProperties).values({
+      cycleId,
+      projectId: project.id,
+      workspaceId: workspace.id,
+      userId: user.id,
+    }).returning();
+    props = created;
+  }
+
+  return c.json(formatCycleUserProperties(props!));
+});
+
+// PATCH /:projectId/cycles/:cycleId/user-properties/
+projectRoutes.patch(
+  "/:projectId/cycles/:cycleId/user-properties/",
+  zValidator("json", updateCycleUserPropertiesSchema),
+  async (c) => {
+    const project = c.get("project");
+    const workspace = c.get("workspace");
+    const user = c.get("user");
+    if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+    const cycleId = c.req.param("cycleId");
+
+    const cycle = await db.query.cycles.findFirst({
+      where: and(eq(cycles.id, cycleId), eq(cycles.projectId, project.id)),
+    });
+    if (!cycle) return c.json({ detail: "Cycle not found." }, 404);
+
+    // Find or create
+    let props = await db.query.cycleUserProperties.findFirst({
+      where: and(
+        eq(cycleUserProperties.cycleId, cycleId),
+        eq(cycleUserProperties.userId, user.id)
+      ),
+    });
+
+    if (!props) {
+      const [created] = await db.insert(cycleUserProperties).values({
+        cycleId,
+        projectId: project.id,
+        workspaceId: workspace.id,
+        userId: user.id,
+      }).returning();
+      props = created;
+    }
+
+    const body = c.req.valid("json");
+    const updateData: Record<string, any> = { updatedAt: new Date() };
+
+    if (body.filters !== undefined) updateData.filters = body.filters;
+    if (body.display_filters !== undefined) updateData.displayFilters = body.display_filters;
+    if (body.display_properties !== undefined) updateData.displayProperties = body.display_properties;
+    if (body.rich_filters !== undefined) updateData.richFilters = body.rich_filters;
+
+    await db.update(cycleUserProperties)
+      .set(updateData)
+      .where(eq(cycleUserProperties.id, props!.id));
+
+    const updated = await db.query.cycleUserProperties.findFirst({
+      where: eq(cycleUserProperties.id, props!.id),
+    });
+
+    return c.json(formatCycleUserProperties(updated!));
+  }
+);
+
+// =====================================================
+// 4.8 Module User Properties
+// =====================================================
+
+const updateModuleUserPropertiesSchema = z.object({
+  filters: z.record(z.string(), z.any()).optional(),
+  display_filters: z.record(z.string(), z.any()).optional(),
+  display_properties: z.record(z.string(), z.any()).optional(),
+  rich_filters: z.record(z.string(), z.any()).optional(),
+});
+
+function formatModuleUserProperties(p: typeof moduleUserProperties.$inferSelect) {
+  return {
+    id: p.id,
+    module: p.moduleId,
+    project: p.projectId,
+    workspace: p.workspaceId,
+    user: p.userId,
+    filters: p.filters ?? {},
+    display_filters: p.displayFilters ?? {},
+    display_properties: p.displayProperties ?? {},
+    rich_filters: p.richFilters ?? {},
+    created_at: p.createdAt?.toISOString() ?? null,
+    updated_at: p.updatedAt?.toISOString() ?? null,
+  };
+}
+
+// GET /:projectId/modules/:moduleId/user-properties/
+projectRoutes.get("/:projectId/modules/:moduleId/user-properties/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const moduleId = c.req.param("moduleId");
+
+  const mod = await db.query.modules.findFirst({
+    where: and(eq(modules.id, moduleId), eq(modules.projectId, project.id)),
+  });
+  if (!mod) return c.json({ detail: "Module not found." }, 404);
+
+  let props = await db.query.moduleUserProperties.findFirst({
+    where: and(
+      eq(moduleUserProperties.moduleId, moduleId),
+      eq(moduleUserProperties.userId, user.id)
+    ),
+  });
+
+  if (!props) {
+    const [created] = await db.insert(moduleUserProperties).values({
+      moduleId,
+      projectId: project.id,
+      workspaceId: workspace.id,
+      userId: user.id,
+    }).returning();
+    props = created;
+  }
+
+  return c.json(formatModuleUserProperties(props!));
+});
+
+// PATCH /:projectId/modules/:moduleId/user-properties/
+projectRoutes.patch(
+  "/:projectId/modules/:moduleId/user-properties/",
+  zValidator("json", updateModuleUserPropertiesSchema),
+  async (c) => {
+    const project = c.get("project");
+    const workspace = c.get("workspace");
+    const user = c.get("user");
+    if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+    const moduleId = c.req.param("moduleId");
+
+    const mod = await db.query.modules.findFirst({
+      where: and(eq(modules.id, moduleId), eq(modules.projectId, project.id)),
+    });
+    if (!mod) return c.json({ detail: "Module not found." }, 404);
+
+    let props = await db.query.moduleUserProperties.findFirst({
+      where: and(
+        eq(moduleUserProperties.moduleId, moduleId),
+        eq(moduleUserProperties.userId, user.id)
+      ),
+    });
+
+    if (!props) {
+      const [created] = await db.insert(moduleUserProperties).values({
+        moduleId,
+        projectId: project.id,
+        workspaceId: workspace.id,
+        userId: user.id,
+      }).returning();
+      props = created;
+    }
+
+    const body = c.req.valid("json");
+    const updateData: Record<string, any> = { updatedAt: new Date() };
+
+    if (body.filters !== undefined) updateData.filters = body.filters;
+    if (body.display_filters !== undefined) updateData.displayFilters = body.display_filters;
+    if (body.display_properties !== undefined) updateData.displayProperties = body.display_properties;
+    if (body.rich_filters !== undefined) updateData.richFilters = body.rich_filters;
+
+    await db.update(moduleUserProperties)
+      .set(updateData)
+      .where(eq(moduleUserProperties.id, props!.id));
+
+    const updated = await db.query.moduleUserProperties.findFirst({
+      where: eq(moduleUserProperties.id, props!.id),
+    });
+
+    return c.json(formatModuleUserProperties(updated!));
+  }
+);
 
 export { projectRoutes };

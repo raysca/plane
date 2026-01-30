@@ -187,7 +187,7 @@ app.post("/api/assets/v2/workspaces/:slug/", async (c) => {
   });
 
   return c.json({
-    upload_data: { url: `http://localhost/upload/${assetKey}`, method: "PUT" },
+    upload_data: { url: `http://localhost/upload/${assetKey}`, fields: { "Content-Type": type, key: assetKey } },
     asset_id: assetId,
     asset_url: `/api/assets/v2/static/${assetId}/`,
   });
@@ -374,7 +374,7 @@ app.post("/api/assets/v2/user-assets/", async (c) => {
   });
 
   return c.json({
-    upload_data: { url: `http://localhost/upload/${assetKey}`, method: "PUT" },
+    upload_data: { url: `http://localhost/upload/${assetKey}`, fields: { "Content-Type": type, key: assetKey } },
     asset_id: assetId,
     asset_url: `/api/assets/v2/static/${assetId}/`,
   });
@@ -428,7 +428,7 @@ app.post("/api/assets/v2/workspaces/:slug/projects/:projectId/", async (c) => {
   });
 
   return c.json({
-    upload_data: { url: `http://localhost/upload/${assetKey}`, method: "PUT" },
+    upload_data: { url: `http://localhost/upload/${assetKey}`, fields: { "Content-Type": type, key: assetKey } },
     asset_id: assetId,
     asset_url: `/api/assets/v2/workspaces/${slug}/projects/${projectId}/${assetId}/`,
   });
@@ -488,7 +488,9 @@ describe("POST /api/assets/v2/workspaces/:slug/ (create workspace asset)", () =>
     expect(data.asset_id).toBeDefined();
     expect(data.upload_data).toBeDefined();
     expect(data.upload_data.url).toContain("logo.png");
-    expect(data.upload_data.method).toBe("PUT");
+    expect(data.upload_data.fields).toBeDefined();
+    expect(data.upload_data.fields["Content-Type"]).toBe("image/png");
+    expect(data.upload_data.fields.key).toBeDefined();
     expect(data.asset_url).toBe(`/api/assets/v2/static/${data.asset_id}/`);
   });
 

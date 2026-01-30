@@ -15,6 +15,7 @@ import { instanceRoutes } from "./routes/instances";
 import { workspaceSlugCheckRoutes } from "./routes/workspace-slug-check";
 import { externalRoutes } from "./routes/external";
 import { assetRoutes } from "./routes/assets";
+import { timezoneRoutes } from "./routes/timezones";
 
 
 // Types for context variables
@@ -115,6 +116,7 @@ app.route("/api/workspaces/:slug/projects/:projectId/issues/", issueRoutes);
 app.route("/api/workspace-slug-check/", workspaceSlugCheckRoutes);
 app.route("/api/unsplash/", externalRoutes);
 app.route("/api/assets/v2/", assetRoutes);
+app.route("/api/timezones/", timezoneRoutes);
 
 // 404 handler
 app.notFound((c) => {

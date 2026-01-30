@@ -16,9 +16,11 @@ When asked to migrate a describe feature that exists in Django you should:
 4. Investigate the admin frontend code in the admin folder to understand the UI and user experience associated with the feature and how it interacts with the backend.
 5. Create a plan for the migration.
 6. Migrate the feature to Bun in the api-next folder.
-7. Run the database migrations if needed.
-8. Test the migrated feature.
-9. Document the migration.
+7. Remember that the routes in api-next should be end with a slash.
+8. Update the admin frontend code in the admin folder to use the new Bun backend.
+9. Run the database migrations if needed.
+10. Test the migrated feature.
+11. Document the migration.
 
 ## Important Notes
 
