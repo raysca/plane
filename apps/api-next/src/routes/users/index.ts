@@ -14,6 +14,7 @@ import {
   workspaceInvitations,
   recentVisits,
 } from "../../db/schema/workspace";
+import { projects, projectMembers } from "../../db/schema/project";
 import { notificationPreferences } from "../../db/schema/notification";
 import { authMiddleware } from "../../middleware/auth";
 import type { Variables } from "../../app";
@@ -924,5 +925,59 @@ userRoutes.post(
     return new Response(null, { status: 204 });
   }
 );
+
+// GET /api/users/me/workspaces/:slug/project-roles/ - Get user's role in each project within a workspace
+userRoutes.get("/me/workspaces/:slug/project-roles/", async (c) => {
+  const contextUser = c.get("user");
+  if (!contextUser) {
+    return c.json({ detail: "Authentication required." }, 401);
+  }
+
+  const slug = c.req.param("slug");
+
+  // Verify user is an active workspace member
+  const workspaceMembership = await db
+    .select({ workspaceId: workspaces.id })
+    .from(workspaceMembers)
+    .innerJoin(workspaces, eq(workspaceMembers.workspaceId, workspaces.id))
+    .where(
+      and(
+        eq(workspaces.slug, slug),
+        eq(workspaceMembers.userId, contextUser.id),
+        eq(workspaceMembers.isActive, true)
+      )
+    )
+    .limit(1);
+
+  if (workspaceMembership.length === 0) {
+    return c.json({ detail: "You are not a member of this workspace." }, 403);
+  }
+
+  const workspaceId = workspaceMembership[0]!.workspaceId;
+
+  // Get all active project memberships for this user in this workspace
+  const memberships = await db
+    .select({
+      projectId: projectMembers.projectId,
+      role: projectMembers.role,
+    })
+    .from(projectMembers)
+    .innerJoin(projects, eq(projectMembers.projectId, projects.id))
+    .where(
+      and(
+        eq(projectMembers.memberId, contextUser.id),
+        eq(projectMembers.isActive, true),
+        eq(projects.workspaceId, workspaceId)
+      )
+    );
+
+  // Build {project_id: role} dictionary
+  const projectRoles: Record<string, number> = {};
+  for (const m of memberships) {
+    projectRoles[m.projectId] = m.role;
+  }
+
+  return c.json(projectRoles);
+});
 
 export { userRoutes };
