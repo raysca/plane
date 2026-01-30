@@ -12,7 +12,7 @@ import {
   estimates,
   estimatePoints,
 } from "../../db/schema/project";
-import { workspaces, workspaceMembers } from "../../db/schema/workspace";
+import { workspaces, workspaceMembers, favorites, recentVisits } from "../../db/schema/workspace";
 import { authMiddleware, ROLES } from "../../middleware/auth";
 import {
   workspaceMiddleware,
@@ -49,6 +49,7 @@ const createProjectSchema = z.object({
   network: z.number().int().refine((v) => [0, 2].includes(v)).optional(),
   emoji: z.string().optional().nullable(),
   icon_prop: z.record(z.string(), z.unknown()).optional().nullable(),
+  logo_props: z.record(z.string(), z.unknown()).optional().nullable(),
   cover_image: z.string().optional().nullable(),
   project_lead: z.string().optional().nullable(),
   default_assignee: z.string().optional().nullable(),
@@ -62,6 +63,7 @@ const updateProjectSchema = z.object({
   network: z.number().int().refine((v) => [0, 2].includes(v)).optional(),
   emoji: z.string().optional().nullable(),
   icon_prop: z.record(z.string(), z.unknown()).optional().nullable(),
+  logo_props: z.record(z.string(), z.unknown()).optional().nullable(),
   cover_image: z.string().optional().nullable(),
   project_lead: z.string().optional().nullable(),
   default_assignee: z.string().optional().nullable(),
@@ -70,6 +72,14 @@ const updateProjectSchema = z.object({
   estimate_id: z.string().optional().nullable(),
   default_state_id: z.string().optional().nullable(),
   sort_order: z.number().optional(),
+  cycle_view: z.boolean().optional(),
+  module_view: z.boolean().optional(),
+  page_view: z.boolean().optional(),
+  issue_views_view: z.boolean().optional(),
+  inbox_view: z.boolean().optional(),
+  guest_view_all_features: z.boolean().optional(),
+  is_time_tracking_enabled: z.boolean().optional(),
+  is_issue_type_enabled: z.boolean().optional(),
 });
 
 const addMembersSchema = z.object({
@@ -151,9 +161,18 @@ const updateEstimatePointSchema = z.object({
 
 // --- Helper formatters ---
 
-function formatProject(p: typeof projects.$inferSelect, memberCount?: number) {
+function formatProject(p: typeof projects.$inferSelect, extra?: {
+  memberCount?: number;
+  isFavorite?: boolean;
+  memberRole?: number | null;
+  isMember?: boolean;
+  sortOrder?: number | null;
+  anchor?: string | null;
+  members?: string[];
+}) {
   return {
     id: p.id,
+    workspace: p.workspaceId,
     workspace_id: p.workspaceId,
     name: p.name,
     description: p.description ?? "",
@@ -163,20 +182,32 @@ function formatProject(p: typeof projects.$inferSelect, memberCount?: number) {
     identifier: p.identifier,
     emoji: p.emoji ?? null,
     icon_prop: p.iconProp ?? null,
+    logo_props: p.logoProps ?? {},
     cover_image: p.coverImage ?? null,
+    cover_image_url: p.coverImage ?? null,
     archive_in: p.archiveIn ?? 0,
     close_in: p.closeIn ?? 0,
-    default_assignee_id: p.defaultAssigneeId ?? null,
-    default_state_id: p.defaultStateId ?? null,
-    project_lead_id: p.projectLeadId ?? null,
-    estimate_id: p.estimateId ?? null,
-    sort_order: p.sortOrder ?? 65535,
-    created_by_id: p.createdById ?? null,
+    default_assignee: p.defaultAssigneeId ?? null,
+    default_state: p.defaultStateId ?? null,
+    project_lead: p.projectLeadId ?? null,
+    estimate: p.estimateId ?? null,
+    cycle_view: p.cycleView ?? true,
+    module_view: p.moduleView ?? true,
+    issue_views_view: p.issueViewsView ?? true,
+    page_view: p.pageView ?? true,
+    inbox_view: p.intakeView ?? false,
+    guest_view_all_features: p.guestViewAllFeatures ?? false,
+    archived_at: p.archivedAt?.toISOString() ?? null,
+    sort_order: extra?.sortOrder ?? p.sortOrder ?? 65535,
+    is_favorite: extra?.isFavorite ?? false,
+    is_member: extra?.isMember ?? false,
+    member_role: extra?.memberRole ?? null,
+    members: extra?.members ?? [],
+    anchor: extra?.anchor ?? null,
+    total_members: extra?.memberCount ?? 0,
+    created_by: p.createdById ?? null,
     created_at: p.createdAt?.toISOString() ?? null,
     updated_at: p.updatedAt?.toISOString() ?? null,
-    total_members: memberCount ?? 0,
-    is_member: false, // will be overridden per-request
-    member_role: null as number | null,
   };
 }
 
@@ -262,35 +293,52 @@ function formatEstimatePoint(p: typeof estimatePoints.$inferSelect) {
   };
 }
 
-// Default states for new projects
+// Default states for new projects (matching Django's DEFAULT_STATES)
 const DEFAULT_STATES = [
-  { name: "Backlog", color: "#A3A3A3", group: "backlog", sequence: 1 },
-  { name: "Todo", color: "#3A3A3A", group: "unstarted", sequence: 2 },
-  { name: "In Progress", color: "#F59E0B", group: "started", sequence: 3 },
-  { name: "Done", color: "#16A34A", group: "completed", sequence: 4 },
-  { name: "Cancelled", color: "#EF4444", group: "cancelled", sequence: 5 },
+  { name: "Backlog", color: "#60646C", group: "backlog", sequence: 15000, default: true },
+  { name: "Todo", color: "#60646C", group: "unstarted", sequence: 25000, default: false },
+  { name: "In Progress", color: "#F59E0B", group: "started", sequence: 35000, default: false },
+  { name: "Done", color: "#46A758", group: "completed", sequence: 45000, default: false },
+  { name: "Cancelled", color: "#9AA4BC", group: "cancelled", sequence: 55000, default: false },
 ];
 
 // =====================================================
 // 4.1 Project CRUD
 // =====================================================
 
-// GET / - List projects for workspace
+// GET / - List projects for workspace (minimal response matching Django's .values())
 projectRoutes.get("/", async (c) => {
   const workspace = c.get("workspace");
   const user = c.get("user");
   if (!workspace || !user) return c.json({ detail: "Not found." }, 404);
 
-  // Get all projects in workspace where user is a member or project is public
+  // Get user's workspace role
+  const wsMembership = await db.query.workspaceMembers.findFirst({
+    where: and(
+      eq(workspaceMembers.workspaceId, workspace.id),
+      eq(workspaceMembers.userId, user.id),
+      eq(workspaceMembers.isActive, true)
+    ),
+  });
+
+  // Get user's project memberships with sort_order
   const userMemberships = await db
-    .select({ projectId: projectMembers.projectId, role: projectMembers.role })
+    .select({
+      projectId: projectMembers.projectId,
+      role: projectMembers.role,
+      sortOrder: projectMembers.sortOrder,
+    })
     .from(projectMembers)
-    .where(eq(projectMembers.memberId, user.id));
+    .where(and(
+      eq(projectMembers.memberId, user.id),
+      eq(projectMembers.isActive, true)
+    ));
 
-  const memberProjectIds = userMemberships.map((m) => m.projectId);
+  const memberProjectIds = new Set(userMemberships.map((m) => m.projectId));
   const memberRoleMap = new Map(userMemberships.map((m) => [m.projectId, m.role]));
+  const memberSortOrderMap = new Map(userMemberships.map((m) => [m.projectId, m.sortOrder]));
 
-  // Get projects: either member of, or public within workspace
+  // Get all workspace projects (not soft-deleted)
   const allProjects = await db.query.projects.findMany({
     where: and(
       eq(projects.workspaceId, workspace.id),
@@ -299,34 +347,44 @@ projectRoutes.get("/", async (c) => {
     orderBy: [asc(projects.sortOrder), asc(projects.name)],
   });
 
-  // Filter: user is member OR project is public (network=2) and user is workspace member
-  const visibleProjects = allProjects.filter(
-    (p) => memberProjectIds.includes(p.id) || p.network === 2
-  );
+  // Filter based on workspace role (matching Django's behavior)
+  let visibleProjects = allProjects;
+  const wsRole = wsMembership?.role;
 
-  // Get member counts
-  const memberCounts = await db
-    .select({
-      projectId: projectMembers.projectId,
-      count: countFn(),
-    })
-    .from(projectMembers)
-    .where(
-      inArray(
-        projectMembers.projectId,
-        visibleProjects.map((p) => p.id)
-      )
-    )
-    .groupBy(projectMembers.projectId);
+  if (wsRole === ROLES.GUEST) {
+    // Guests only see projects they are members of
+    visibleProjects = allProjects.filter((p) => memberProjectIds.has(p.id));
+  } else if (wsRole === ROLES.MEMBER) {
+    // Members see projects they are members of + public projects
+    visibleProjects = allProjects.filter(
+      (p) => memberProjectIds.has(p.id) || p.network === 2
+    );
+  }
+  // Admins see all projects
 
-  const countMap = new Map(memberCounts.map((mc) => [mc.projectId, mc.count]));
-
-  const results = visibleProjects.map((p) => {
-    const formatted = formatProject(p, countMap.get(p.id) ?? 0);
-    formatted.is_member = memberProjectIds.includes(p.id);
-    formatted.member_role = memberRoleMap.get(p.id) ?? null;
-    return formatted;
-  });
+  // Return minimal response matching Django's .values() call
+  const results = visibleProjects.map((p) => ({
+    id: p.id,
+    name: p.name,
+    identifier: p.identifier,
+    sort_order: memberSortOrderMap.get(p.id) ?? p.sortOrder ?? 65535,
+    logo_props: p.logoProps ?? {},
+    member_role: memberRoleMap.get(p.id) ?? null,
+    archived_at: p.archivedAt?.toISOString() ?? null,
+    workspace: p.workspaceId,
+    cycle_view: p.cycleView ?? true,
+    issue_views_view: p.issueViewsView ?? true,
+    module_view: p.moduleView ?? true,
+    page_view: p.pageView ?? true,
+    inbox_view: p.intakeView ?? false,
+    guest_view_all_features: p.guestViewAllFeatures ?? false,
+    project_lead: p.projectLeadId ?? null,
+    network: p.network ?? 2,
+    created_at: p.createdAt?.toISOString() ?? null,
+    updated_at: p.updatedAt?.toISOString() ?? null,
+    created_by: p.createdById ?? null,
+    updated_by: null,
+  }));
 
   return c.json(results);
 });
@@ -376,6 +434,7 @@ projectRoutes.post("/", requireWorkspaceMember, zValidator("json", createProject
       network: body.network ?? 2,
       emoji: body.emoji,
       iconProp: body.icon_prop,
+      logoProps: body.logo_props,
       coverImage: body.cover_image,
       projectLeadId: body.project_lead,
       defaultAssigneeId: body.default_assignee,
@@ -391,6 +450,15 @@ projectRoutes.post("/", requireWorkspaceMember, zValidator("json", createProject
     role: ROLES.ADMIN,
   });
 
+  // Add project_lead as admin member if different from creator (matching Django)
+  if (body.project_lead && body.project_lead !== user.id) {
+    await db.insert(projectMembers).values({
+      projectId: project.id,
+      memberId: body.project_lead,
+      role: ROLES.ADMIN,
+    });
+  }
+
   // Create default states
   for (const state of DEFAULT_STATES) {
     await db.insert(states).values({
@@ -400,23 +468,32 @@ projectRoutes.post("/", requireWorkspaceMember, zValidator("json", createProject
       color: state.color,
       group: state.group,
       sequence: state.sequence,
-      isDefault: state.group === "backlog", // Backlog is default
+      isDefault: state.default,
     });
   }
 
-  const formatted = formatProject(project, 1);
-  formatted.is_member = true;
-  formatted.member_role = ROLES.ADMIN;
-  return c.json(formatted, 201);
+  return c.json(formatProject(project, {
+    memberCount: 1,
+    isMember: true,
+    memberRole: ROLES.ADMIN,
+  }), 201);
 });
 
-// GET /details/ - Get all projects with detailed info (member counts, user membership)
+// GET /details/ - Get all projects with detailed info (matching Django's list_detail)
 projectRoutes.get("/details/", async (c) => {
   const workspace = c.get("workspace");
   const user = c.get("user");
   if (!workspace || !user) return c.json({ detail: "Not found." }, 404);
 
-  // Same as list but with more detail - reuse list logic
+  // Get user's workspace role
+  const wsMembership = await db.query.workspaceMembers.findFirst({
+    where: and(
+      eq(workspaceMembers.workspaceId, workspace.id),
+      eq(workspaceMembers.userId, user.id),
+      eq(workspaceMembers.isActive, true)
+    ),
+  });
+
   const allProjects = await db.query.projects.findMany({
     where: and(
       eq(projects.workspaceId, workspace.id),
@@ -425,40 +502,97 @@ projectRoutes.get("/details/", async (c) => {
     orderBy: [asc(projects.sortOrder), asc(projects.name)],
   });
 
+  // Get user's project memberships
   const userMemberships = await db
-    .select({ projectId: projectMembers.projectId, role: projectMembers.role })
+    .select({
+      projectId: projectMembers.projectId,
+      role: projectMembers.role,
+      sortOrder: projectMembers.sortOrder,
+    })
     .from(projectMembers)
-    .where(eq(projectMembers.memberId, user.id));
+    .where(and(
+      eq(projectMembers.memberId, user.id),
+      eq(projectMembers.isActive, true)
+    ));
 
-  const memberProjectIds = userMemberships.map((m) => m.projectId);
+  const memberProjectIds = new Set(userMemberships.map((m) => m.projectId));
   const memberRoleMap = new Map(userMemberships.map((m) => [m.projectId, m.role]));
+  const memberSortOrderMap = new Map(userMemberships.map((m) => [m.projectId, m.sortOrder]));
 
-  const visibleProjects = allProjects.filter(
-    (p) => memberProjectIds.includes(p.id) || p.network === 2
-  );
+  // Filter based on workspace role
+  let visibleProjects = allProjects;
+  const wsRole = wsMembership?.role;
 
+  if (wsRole === ROLES.GUEST) {
+    visibleProjects = allProjects.filter((p) => memberProjectIds.has(p.id));
+  } else if (wsRole === ROLES.MEMBER) {
+    visibleProjects = allProjects.filter(
+      (p) => memberProjectIds.has(p.id) || p.network === 2
+    );
+  }
+
+  if (visibleProjects.length === 0) {
+    return c.json([]);
+  }
+
+  const projectIds = visibleProjects.map((p) => p.id);
+
+  // Get member counts
   const memberCounts = await db
     .select({
       projectId: projectMembers.projectId,
       count: countFn(),
     })
     .from(projectMembers)
-    .where(
-      inArray(
-        projectMembers.projectId,
-        visibleProjects.map((p) => p.id)
-      )
-    )
+    .where(and(
+      inArray(projectMembers.projectId, projectIds),
+      eq(projectMembers.isActive, true)
+    ))
     .groupBy(projectMembers.projectId);
 
   const countMap = new Map(memberCounts.map((mc) => [mc.projectId, mc.count]));
 
-  const results = visibleProjects.map((p) => {
-    const formatted = formatProject(p, countMap.get(p.id) ?? 0);
-    formatted.is_member = memberProjectIds.includes(p.id);
-    formatted.member_role = memberRoleMap.get(p.id) ?? null;
-    return formatted;
-  });
+  // Get favorites for the user
+  const userFavorites = await db
+    .select({ entityId: favorites.entityId })
+    .from(favorites)
+    .where(and(
+      eq(favorites.userId, user.id),
+      eq(favorites.workspaceId, workspace.id),
+      eq(favorites.entityType, "project")
+    ));
+
+  const favoriteProjectIds = new Set(userFavorites.map((f) => f.entityId).filter(Boolean));
+
+  // Get active member IDs per project
+  const allMembers = await db
+    .select({
+      projectId: projectMembers.projectId,
+      memberId: projectMembers.memberId,
+    })
+    .from(projectMembers)
+    .where(and(
+      inArray(projectMembers.projectId, projectIds),
+      eq(projectMembers.isActive, true)
+    ));
+
+  const membersMap = new Map<string, string[]>();
+  for (const m of allMembers) {
+    const list = membersMap.get(m.projectId) ?? [];
+    list.push(m.memberId);
+    membersMap.set(m.projectId, list);
+  }
+
+  const results = visibleProjects.map((p) =>
+    formatProject(p, {
+      memberCount: countMap.get(p.id) ?? 0,
+      isFavorite: favoriteProjectIds.has(p.id),
+      isMember: memberProjectIds.has(p.id),
+      memberRole: memberRoleMap.get(p.id) ?? null,
+      sortOrder: memberSortOrderMap.get(p.id) ?? p.sortOrder ?? 65535,
+      members: membersMap.get(p.id) ?? [],
+    })
+  );
 
   return c.json(results);
 });
@@ -480,35 +614,118 @@ projectRoutes.get("/identifiers/", async (c) => {
 projectRoutes.use("/:projectId/*", projectMiddleware);
 projectRoutes.use("/:projectId", projectMiddleware);
 
-// GET /:projectId/ - Get project
+// GET /:projectId/ - Get project (matching Django's retrieve)
 projectRoutes.get("/:projectId/", async (c) => {
   const project = c.get("project");
   const user = c.get("user");
-  if (!project || !user) return c.json({ detail: "Not found." }, 404);
+  const workspace = c.get("workspace");
+  if (!project || !user || !workspace) return c.json({ detail: "Not found." }, 404);
 
   const fullProject = await db.query.projects.findFirst({
-    where: eq(projects.id, project.id),
+    where: and(
+      eq(projects.id, project.id),
+      isNull(projects.archivedAt)
+    ),
   });
 
-  if (!fullProject) return c.json({ detail: "Not found." }, 404);
+  if (!fullProject) return c.json({ error: "Project does not exist" }, 404);
 
+  // Check if user is a member
+  const membership = c.get("projectMembership");
+  if (!membership) {
+    // Not a member - check if project is secret or public
+    if (fullProject.network === 0) {
+      return c.json({ error: "You do not have permission" }, 403);
+    } else {
+      return c.json({ error: "You are not a member of this project" }, 409);
+    }
+  }
+
+  // Get member count
   const memberCountResult = await db
     .select({ count: countFn() })
     .from(projectMembers)
-    .where(eq(projectMembers.projectId, project.id));
+    .where(and(
+      eq(projectMembers.projectId, project.id),
+      eq(projectMembers.isActive, true)
+    ));
 
-  const membership = c.get("projectMembership");
-  const formatted = formatProject(fullProject, memberCountResult[0]?.count ?? 0);
-  formatted.is_member = !!membership;
-  formatted.member_role = membership?.role ?? null;
+  // Get member IDs
+  const membersList = await db
+    .select({ memberId: projectMembers.memberId })
+    .from(projectMembers)
+    .where(and(
+      eq(projectMembers.projectId, project.id),
+      eq(projectMembers.isActive, true)
+    ));
 
-  return c.json(formatted);
+  // Check if favorited
+  const fav = await db.query.favorites.findFirst({
+    where: and(
+      eq(favorites.userId, user.id),
+      eq(favorites.entityType, "project"),
+      eq(favorites.entityId, project.id)
+    ),
+  });
+
+  // Log recent visit
+  try {
+    await db.insert(recentVisits).values({
+      workspaceId: workspace.id,
+      userId: user.id,
+      entityType: "project",
+      entityId: project.id,
+    });
+  } catch {
+    // Non-critical, ignore errors
+  }
+
+  return c.json(formatProject(fullProject, {
+    memberCount: memberCountResult[0]?.count ?? 0,
+    isFavorite: !!fav,
+    isMember: true,
+    memberRole: membership.role,
+    members: membersList.map((m) => m.memberId),
+  }));
 });
 
-// PATCH /:projectId/ - Update project
-projectRoutes.patch("/:projectId/", requireProjectAdmin, zValidator("json", updateProjectSchema), async (c) => {
+// PATCH /:projectId/ - Update project (matching Django's partial_update)
+projectRoutes.patch("/:projectId/", zValidator("json", updateProjectSchema), async (c) => {
   const project = c.get("project");
-  if (!project) return c.json({ detail: "Not found." }, 404);
+  const user = c.get("user");
+  const workspace = c.get("workspace");
+  if (!project || !user || !workspace) return c.json({ detail: "Not found." }, 404);
+
+  // Check if user is workspace admin or project admin (matching Django)
+  const isWorkspaceAdmin = await db.query.workspaceMembers.findFirst({
+    where: and(
+      eq(workspaceMembers.workspaceId, workspace.id),
+      eq(workspaceMembers.userId, user.id),
+      eq(workspaceMembers.isActive, true),
+      eq(workspaceMembers.role, ROLES.ADMIN)
+    ),
+  });
+
+  const isProjectAdmin = await db.query.projectMembers.findFirst({
+    where: and(
+      eq(projectMembers.projectId, project.id),
+      eq(projectMembers.memberId, user.id),
+      eq(projectMembers.role, ROLES.ADMIN),
+      eq(projectMembers.isActive, true)
+    ),
+  });
+
+  if (!isProjectAdmin && !isWorkspaceAdmin) {
+    return c.json({ error: "You don't have the required permissions." }, 403);
+  }
+
+  // Check if project is archived
+  const fullProject = await db.query.projects.findFirst({
+    where: eq(projects.id, project.id),
+  });
+  if (fullProject?.archivedAt) {
+    return c.json({ error: "Archived projects cannot be updated" }, 400);
+  }
 
   const body = c.req.valid("json");
 
@@ -521,6 +738,7 @@ projectRoutes.patch("/:projectId/", requireProjectAdmin, zValidator("json", upda
   if (body.network !== undefined) updateData.network = body.network;
   if (body.emoji !== undefined) updateData.emoji = body.emoji;
   if (body.icon_prop !== undefined) updateData.iconProp = body.icon_prop;
+  if (body.logo_props !== undefined) updateData.logoProps = body.logo_props;
   if (body.cover_image !== undefined) updateData.coverImage = body.cover_image;
   if (body.project_lead !== undefined) updateData.projectLeadId = body.project_lead;
   if (body.default_assignee !== undefined) updateData.defaultAssigneeId = body.default_assignee;
@@ -529,6 +747,15 @@ projectRoutes.patch("/:projectId/", requireProjectAdmin, zValidator("json", upda
   if (body.estimate_id !== undefined) updateData.estimateId = body.estimate_id;
   if (body.default_state_id !== undefined) updateData.defaultStateId = body.default_state_id;
   if (body.sort_order !== undefined) updateData.sortOrder = body.sort_order;
+  if (body.cycle_view !== undefined) updateData.cycleView = body.cycle_view;
+  if (body.module_view !== undefined) updateData.moduleView = body.module_view;
+  if (body.page_view !== undefined) updateData.pageView = body.page_view;
+  if (body.issue_views_view !== undefined) updateData.issueViewsView = body.issue_views_view;
+  if (body.guest_view_all_features !== undefined) updateData.guestViewAllFeatures = body.guest_view_all_features;
+  if (body.is_time_tracking_enabled !== undefined) updateData.isTimeTrackingEnabled = body.is_time_tracking_enabled;
+  if (body.is_issue_type_enabled !== undefined) updateData.isIssueTypeEnabled = body.is_issue_type_enabled;
+  // Map inbox_view to intake_view (Django compatibility)
+  if (body.inbox_view !== undefined) updateData.intakeView = body.inbox_view;
 
   await db.update(projects).set(updateData).where(eq(projects.id, project.id));
 
@@ -539,22 +766,57 @@ projectRoutes.patch("/:projectId/", requireProjectAdmin, zValidator("json", upda
   const memberCountResult = await db
     .select({ count: countFn() })
     .from(projectMembers)
-    .where(eq(projectMembers.projectId, project.id));
+    .where(and(
+      eq(projectMembers.projectId, project.id),
+      eq(projectMembers.isActive, true)
+    ));
 
   const membership = c.get("projectMembership");
-  const formatted = formatProject(updated!, memberCountResult[0]?.count ?? 0);
-  formatted.is_member = !!membership;
-  formatted.member_role = membership?.role ?? null;
 
-  return c.json(formatted);
+  return c.json(formatProject(updated!, {
+    memberCount: memberCountResult[0]?.count ?? 0,
+    isMember: !!membership,
+    memberRole: membership?.role ?? null,
+  }));
 });
 
-// DELETE /:projectId/ - Soft delete project
-projectRoutes.delete("/:projectId/", requireProjectAdmin, async (c) => {
+// DELETE /:projectId/ - Delete project (matching Django's destroy)
+projectRoutes.delete("/:projectId/", async (c) => {
   const project = c.get("project");
-  if (!project) return c.json({ detail: "Not found." }, 404);
+  const user = c.get("user");
+  const workspace = c.get("workspace");
+  if (!project || !user || !workspace) return c.json({ detail: "Not found." }, 404);
 
-  // Soft delete
+  // Check if user is workspace admin or project admin (matching Django)
+  const isWorkspaceAdmin = await db.query.workspaceMembers.findFirst({
+    where: and(
+      eq(workspaceMembers.workspaceId, workspace.id),
+      eq(workspaceMembers.userId, user.id),
+      eq(workspaceMembers.isActive, true),
+      eq(workspaceMembers.role, ROLES.ADMIN)
+    ),
+  });
+
+  const isProjectAdmin = await db.query.projectMembers.findFirst({
+    where: and(
+      eq(projectMembers.projectId, project.id),
+      eq(projectMembers.memberId, user.id),
+      eq(projectMembers.role, ROLES.ADMIN),
+      eq(projectMembers.isActive, true)
+    ),
+  });
+
+  if (!isProjectAdmin && !isWorkspaceAdmin) {
+    return c.json({ error: "You don't have the required permissions." }, 403);
+  }
+
+  // Delete favorites for this project
+  await db.delete(favorites).where(and(
+    eq(favorites.projectId, project.id),
+    eq(favorites.workspaceId, workspace.id)
+  ));
+
+  // Soft delete the project (set deletedAt)
   await db.update(projects).set({
     deletedAt: new Date(),
     updatedAt: new Date(),

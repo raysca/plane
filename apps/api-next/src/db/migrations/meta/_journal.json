@@ -78,6 +78,13 @@
       "when": 1769726533079,
       "tag": "0010_steep_night_thrasher",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1769754681000,
+      "tag": "0011_long_groot",
+      "breakpoints": true
     }
   ]
 }
