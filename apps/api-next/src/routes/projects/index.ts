@@ -17,6 +17,7 @@ import { workspaces, workspaceMembers, favorites, recentVisits } from "../../db/
 import { cycles, cycleIssues, cycleFavorites, cycleUserProperties } from "../../db/schema/cycle";
 import { modules, moduleIssues, moduleMembers, moduleFavorites, moduleLinks, moduleUserProperties } from "../../db/schema/module";
 import { issues, issueAssignees } from "../../db/schema/issue";
+import { views, viewFavorites } from "../../db/schema/view";
 import { authMiddleware, ROLES } from "../../middleware/auth";
 import {
   workspaceMiddleware,
@@ -3512,5 +3513,377 @@ projectRoutes.patch(
     return c.json(formatModuleUserProperties(updated!));
   }
 );
+
+// ===========================
+// Section: Project Views
+// ===========================
+
+// Helper to format view response
+function formatView(v: any, workspaceId: string, isFavorite: boolean) {
+  return {
+    id: v.id,
+    workspace: workspaceId,
+    project: v.projectId,
+    name: v.name,
+    description: v.description ?? "",
+    query: v.query ?? {},
+    query_data: v.queryData ?? {},
+    filters: v.filtersData ?? {},
+    display_filters: v.displayFilters ?? {},
+    display_properties: v.displayProperties ?? {},
+    access: v.accessLevel ?? 1,
+    sort_order: v.sortOrder ?? 65535,
+    is_locked: v.isLocked ?? false,
+    is_favorite: isFavorite,
+    owned_by: v.ownedById,
+    created_at: v.createdAt?.toISOString() ?? null,
+    updated_at: v.updatedAt?.toISOString() ?? null,
+  };
+}
+
+// GET /:projectId/views/ - List project views
+projectRoutes.get("/:projectId/views/", async (c) => {
+  const workspace = c.get("workspace");
+  const project = c.get("project");
+  const user = c.get("user");
+  const membership = c.get("projectMembership");
+  if (!workspace || !project || !user || !membership)
+    return c.json({ detail: "Not found." }, 404);
+
+  const isGuest = membership.role === ROLES.GUEST;
+
+  // Support order_by query param (default: -created_at)
+  const orderByParam = c.req.query("order_by") ?? "-created_at";
+  const isDescending = orderByParam.startsWith("-");
+  const orderField = orderByParam.replace(/^-/, "");
+  const orderMap: Record<string, any> = {
+    created_at: views.createdAt,
+    updated_at: views.updatedAt,
+    name: views.name,
+    sort_order: views.sortOrder,
+  };
+  const orderCol = orderMap[orderField] ?? views.createdAt;
+  const orderDir = isDescending ? desc(orderCol) : asc(orderCol);
+
+  const allViews = await db.query.views.findMany({
+    where: and(
+      eq(views.workspaceId, workspace.id),
+      eq(views.projectId, project.id)
+    ),
+    orderBy: [orderDir],
+  });
+
+  // Guests only see their own views; others see own + public (accessLevel >= 1)
+  const filtered = isGuest
+    ? allViews.filter((v) => v.ownedById === user.id)
+    : allViews.filter((v) => v.ownedById === user.id || (v.accessLevel ?? 0) >= 1);
+
+  // Get favorites for current user
+  const userFavorites = await db
+    .select({ viewId: viewFavorites.viewId })
+    .from(viewFavorites)
+    .where(eq(viewFavorites.userId, user.id));
+  const favSet = new Set(userFavorites.map((f) => f.viewId));
+
+  // Sort: favorites first, then by the selected order
+  const result = filtered
+    .sort((a, b) => {
+      const aFav = favSet.has(a.id) ? 1 : 0;
+      const bFav = favSet.has(b.id) ? 1 : 0;
+      return bFav - aFav;
+    })
+    .map((v) => formatView(v, workspace.id, favSet.has(v.id)));
+
+  return c.json(result);
+});
+
+// POST /:projectId/views/ - Create project view
+projectRoutes.post(
+  "/:projectId/views/",
+  zValidator(
+    "json",
+    z.object({
+      name: z.string().min(1),
+      description: z.string().optional().default(""),
+      query: z.any().optional().default({}),
+      query_data: z.any().optional().default({}),
+      filters: z.any().optional().default({}),
+      display_filters: z.any().optional().default({}),
+      display_properties: z.any().optional().default({}),
+      access: z.number().int().min(0).max(2).optional().default(1),
+      sort_order: z.number().optional(),
+      is_locked: z.boolean().optional().default(false),
+      logo_props: z.any().optional(),
+    })
+  ),
+  async (c) => {
+    const workspace = c.get("workspace");
+    const project = c.get("project");
+    const user = c.get("user");
+    if (!workspace || !project || !user) return c.json({ detail: "Not found." }, 404);
+
+    const body = c.req.valid("json");
+
+    // Auto-calculate sort_order if not provided
+    let sortOrder = body.sort_order;
+    if (sortOrder === undefined) {
+      const maxResult = await db
+        .select({ largest: max(views.sortOrder) })
+        .from(views)
+        .where(
+          and(
+            eq(views.workspaceId, workspace.id),
+            eq(views.projectId, project.id)
+          )
+        );
+      const largest = maxResult[0]?.largest;
+      sortOrder = largest != null ? largest + 10000 : 65535;
+    }
+
+    const [created] = await db
+      .insert(views)
+      .values({
+        workspaceId: workspace.id,
+        projectId: project.id,
+        name: body.name,
+        description: body.description,
+        query: body.query,
+        queryData: body.query_data,
+        filtersData: body.filters,
+        displayFilters: body.display_filters,
+        displayProperties: body.display_properties,
+        accessLevel: body.access,
+        sortOrder,
+        isLocked: body.is_locked,
+        ownedById: user.id,
+      })
+      .returning();
+
+    return c.json(formatView(created, workspace.id, false), 201);
+  }
+);
+
+// GET /:projectId/views/:viewId/ - Retrieve project view
+projectRoutes.get("/:projectId/views/:viewId/", async (c) => {
+  const workspace = c.get("workspace");
+  const project = c.get("project");
+  const user = c.get("user");
+  if (!workspace || !project || !user) return c.json({ detail: "Not found." }, 404);
+
+  const viewId = c.req.param("viewId");
+
+  const view = await db.query.views.findFirst({
+    where: and(
+      eq(views.id, viewId),
+      eq(views.workspaceId, workspace.id),
+      eq(views.projectId, project.id)
+    ),
+  });
+
+  if (!view) return c.json({ detail: "Not found." }, 404);
+
+  const fav = await db.query.viewFavorites.findFirst({
+    where: and(
+      eq(viewFavorites.viewId, view.id),
+      eq(viewFavorites.userId, user.id)
+    ),
+  });
+
+  return c.json(formatView(view, workspace.id, !!fav));
+});
+
+// PATCH /:projectId/views/:viewId/ - Update project view
+projectRoutes.patch(
+  "/:projectId/views/:viewId/",
+  zValidator(
+    "json",
+    z.object({
+      name: z.string().min(1).optional(),
+      description: z.string().optional(),
+      query: z.any().optional(),
+      query_data: z.any().optional(),
+      filters: z.any().optional(),
+      display_filters: z.any().optional(),
+      display_properties: z.any().optional(),
+      access: z.number().int().min(0).max(2).optional(),
+      sort_order: z.number().optional(),
+      is_locked: z.boolean().optional(),
+      logo_props: z.any().optional(),
+    })
+  ),
+  async (c) => {
+    const workspace = c.get("workspace");
+    const project = c.get("project");
+    const user = c.get("user");
+    if (!workspace || !project || !user) return c.json({ detail: "Not found." }, 404);
+
+    const viewId = c.req.param("viewId");
+
+    const view = await db.query.views.findFirst({
+      where: and(
+        eq(views.id, viewId),
+        eq(views.workspaceId, workspace.id),
+        eq(views.projectId, project.id)
+      ),
+    });
+
+    if (!view) return c.json({ detail: "Not found." }, 404);
+
+    // Only owner can update
+    if (view.ownedById !== user.id) {
+      return c.json({ detail: "Only the owner can update this view." }, 403);
+    }
+
+    const body = c.req.valid("json");
+
+    // Locked views cannot be updated (except to unlock)
+    if (view.isLocked && body.is_locked !== false) {
+      return c.json({ detail: "View is locked." }, 400);
+    }
+
+    const updateData: Record<string, any> = { updatedAt: new Date() };
+    if (body.name !== undefined) updateData.name = body.name;
+    if (body.description !== undefined) updateData.description = body.description;
+    if (body.query !== undefined) updateData.query = body.query;
+    if (body.query_data !== undefined) updateData.queryData = body.query_data;
+    if (body.filters !== undefined) updateData.filtersData = body.filters;
+    if (body.display_filters !== undefined) updateData.displayFilters = body.display_filters;
+    if (body.display_properties !== undefined) updateData.displayProperties = body.display_properties;
+    if (body.access !== undefined) updateData.accessLevel = body.access;
+    if (body.sort_order !== undefined) updateData.sortOrder = body.sort_order;
+    if (body.is_locked !== undefined) updateData.isLocked = body.is_locked;
+
+    const [updated] = await db
+      .update(views)
+      .set(updateData)
+      .where(eq(views.id, viewId))
+      .returning();
+
+    const fav = await db.query.viewFavorites.findFirst({
+      where: and(
+        eq(viewFavorites.viewId, updated.id),
+        eq(viewFavorites.userId, user.id)
+      ),
+    });
+
+    return c.json(formatView(updated, workspace.id, !!fav));
+  }
+);
+
+// DELETE /:projectId/views/:viewId/ - Delete project view
+projectRoutes.delete("/:projectId/views/:viewId/", async (c) => {
+  const workspace = c.get("workspace");
+  const project = c.get("project");
+  const user = c.get("user");
+  const membership = c.get("projectMembership");
+  if (!workspace || !project || !user || !membership)
+    return c.json({ detail: "Not found." }, 404);
+
+  const viewId = c.req.param("viewId");
+
+  const view = await db.query.views.findFirst({
+    where: and(
+      eq(views.id, viewId),
+      eq(views.workspaceId, workspace.id),
+      eq(views.projectId, project.id)
+    ),
+  });
+
+  if (!view) return c.json({ detail: "Not found." }, 404);
+
+  // Only admin or owner can delete
+  const isAdmin = membership.role === ROLES.ADMIN;
+  const isOwner = view.ownedById === user.id;
+  if (!isAdmin && !isOwner) {
+    return c.json({ detail: "Only the owner or admin can delete this view." }, 403);
+  }
+
+  // Delete favorites first, then the view
+  await db.delete(viewFavorites).where(eq(viewFavorites.viewId, viewId));
+  await db.delete(views).where(eq(views.id, viewId));
+
+  return c.body(null, 204);
+});
+
+// POST /:projectId/user-favorite-views/ - Add view to favorites
+projectRoutes.post(
+  "/:projectId/user-favorite-views/",
+  zValidator(
+    "json",
+    z.object({
+      view: z.string().min(1),
+    })
+  ),
+  async (c) => {
+    const workspace = c.get("workspace");
+    const project = c.get("project");
+    const user = c.get("user");
+    if (!workspace || !project || !user) return c.json({ detail: "Not found." }, 404);
+
+    const body = c.req.valid("json");
+
+    // Verify the view exists and belongs to this project
+    const view = await db.query.views.findFirst({
+      where: and(
+        eq(views.id, body.view),
+        eq(views.workspaceId, workspace.id),
+        eq(views.projectId, project.id)
+      ),
+    });
+
+    if (!view) return c.json({ detail: "View not found." }, 404);
+
+    // Check if already favorited
+    const existing = await db.query.viewFavorites.findFirst({
+      where: and(
+        eq(viewFavorites.viewId, view.id),
+        eq(viewFavorites.userId, user.id)
+      ),
+    });
+
+    if (existing) return c.json({ detail: "View already favorited." }, 400);
+
+    const [fav] = await db
+      .insert(viewFavorites)
+      .values({
+        viewId: view.id,
+        userId: user.id,
+      })
+      .returning();
+
+    return c.json(
+      {
+        id: fav.id,
+        view: fav.viewId,
+        user: fav.userId,
+        created_at: fav.createdAt?.toISOString() ?? null,
+      },
+      201
+    );
+  }
+);
+
+// DELETE /:projectId/user-favorite-views/:viewId/ - Remove view from favorites
+projectRoutes.delete("/:projectId/user-favorite-views/:viewId/", async (c) => {
+  const workspace = c.get("workspace");
+  const project = c.get("project");
+  const user = c.get("user");
+  if (!workspace || !project || !user) return c.json({ detail: "Not found." }, 404);
+
+  const viewId = c.req.param("viewId");
+
+  const fav = await db.query.viewFavorites.findFirst({
+    where: and(
+      eq(viewFavorites.viewId, viewId),
+      eq(viewFavorites.userId, user.id)
+    ),
+  });
+
+  if (!fav) return c.json({ detail: "Favorite not found." }, 404);
+
+  await db.delete(viewFavorites).where(eq(viewFavorites.id, fav.id));
+
+  return c.body(null, 204);
+});
 
 export { projectRoutes };

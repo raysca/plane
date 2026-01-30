@@ -53,35 +53,69 @@ issueRoutes.use("*", projectMiddleware);
 
 // --- Validation Schemas ---
 
+// Priority can come as string ("none","urgent","high","medium","low") or number (0-4) or null
+const priorityMap: Record<string, number> = {
+  none: 0,
+  urgent: 1,
+  high: 2,
+  medium: 3,
+  low: 4,
+};
+
+const prioritySchema = z
+  .union([z.number().int().min(0).max(4), z.string(), z.null()])
+  .optional()
+  .transform((val) => {
+    if (val === null || val === undefined) return 0;
+    if (typeof val === "string") return priorityMap[val] ?? 0;
+    return val;
+  });
+
 const createIssueSchema = z.object({
   name: z.string().min(1).max(500),
-  description_html: z.string().optional(),
-  description_stripped: z.string().optional(),
-  priority: z.number().int().min(0).max(4).optional(),
+  description_html: z.string().optional().nullable(),
+  description_stripped: z.string().optional().nullable(),
+  priority: prioritySchema,
   state_id: z.string().optional().nullable(),
   parent_id: z.string().optional().nullable(),
   start_date: z.string().optional().nullable(),
   target_date: z.string().optional().nullable(),
-  sort_order: z.number().optional(),
-  estimate_point: z.number().int().optional().nullable(),
+  sort_order: z.number().optional().nullable(),
+  estimate_point: z.union([z.number(), z.string(), z.null()]).optional().nullable(),
+  // Accept both Django-style (assignees/labels) and frontend-style (assignee_ids/label_ids)
   assignees: z.array(z.string()).optional(),
   labels: z.array(z.string()).optional(),
-});
+  assignee_ids: z.array(z.string()).optional(),
+  label_ids: z.array(z.string()).optional(),
+  // Extra fields the frontend sends that we ignore
+  project_id: z.string().optional().nullable(),
+  cycle_id: z.string().optional().nullable(),
+  module_ids: z.array(z.string()).optional().nullable(),
+  is_draft: z.boolean().optional(),
+  type_id: z.string().optional().nullable(),
+}).passthrough();
 
 const updateIssueSchema = z.object({
   name: z.string().min(1).max(500).optional(),
   description_html: z.string().optional().nullable(),
   description_stripped: z.string().optional().nullable(),
-  priority: z.number().int().min(0).max(4).optional(),
+  priority: prioritySchema,
   state_id: z.string().optional().nullable(),
   parent_id: z.string().optional().nullable(),
   start_date: z.string().optional().nullable(),
   target_date: z.string().optional().nullable(),
-  sort_order: z.number().optional(),
-  estimate_point: z.number().int().optional().nullable(),
+  sort_order: z.number().optional().nullable(),
+  estimate_point: z.union([z.number(), z.string(), z.null()]).optional().nullable(),
   assignees: z.array(z.string()).optional(),
   labels: z.array(z.string()).optional(),
-});
+  assignee_ids: z.array(z.string()).optional(),
+  label_ids: z.array(z.string()).optional(),
+  project_id: z.string().optional().nullable(),
+  cycle_id: z.string().optional().nullable(),
+  module_ids: z.array(z.string()).optional().nullable(),
+  is_draft: z.boolean().optional(),
+  type_id: z.string().optional().nullable(),
+}).passthrough();
 
 const createCommentSchema = z.object({
   comment_html: z.string().optional(),
@@ -736,21 +770,24 @@ issueRoutes.post("/", requireProjectMember, zValidator("json", createIssueSchema
 
   const sequenceId = await getNextSequenceId(project.id);
 
+  // estimate_point can come as string or number
+  const estimatePoint = body.estimate_point != null ? Number(body.estimate_point) : null;
+
   const result = await db
     .insert(issues)
     .values({
       projectId: project.id,
       workspaceId: workspace.id,
       name: body.name,
-      descriptionHtml: body.description_html,
-      descriptionStripped: body.description_stripped,
+      descriptionHtml: body.description_html ?? undefined,
+      descriptionStripped: body.description_stripped ?? undefined,
       priority: body.priority ?? 0,
       stateId,
       parentId: body.parent_id,
       startDate: parseDate(body.start_date),
       targetDate: parseDate(body.target_date),
       sortOrder: body.sort_order ?? 65535,
-      estimatePoint: body.estimate_point,
+      estimatePoint: isNaN(estimatePoint as number) ? null : estimatePoint,
       sequenceId,
       createdById: user.id,
       updatedById: user.id,
@@ -758,12 +795,16 @@ issueRoutes.post("/", requireProjectMember, zValidator("json", createIssueSchema
     .returning();
   const issue = result[0]!;
 
+  // Accept both assignees/labels (Django-style) and assignee_ids/label_ids (frontend-style)
+  const assigneeList = body.assignees ?? body.assignee_ids ?? [];
+  const labelList = body.labels ?? body.label_ids ?? [];
+
   // Sync assignees and labels
-  if (body.assignees && body.assignees.length > 0) {
-    await syncAssignees(issue.id, body.assignees);
+  if (assigneeList.length > 0) {
+    await syncAssignees(issue.id, assigneeList);
   }
-  if (body.labels && body.labels.length > 0) {
-    await syncLabels(issue.id, body.labels);
+  if (labelList.length > 0) {
+    await syncLabels(issue.id, labelList);
   }
 
   // Record activity
@@ -775,18 +816,24 @@ issueRoutes.post("/", requireProjectMember, zValidator("json", createIssueSchema
     verb: "created",
   });
 
-  const assigneeIds = body.assignees ?? [];
-  const labelIds = body.labels ?? [];
+  // Look up the state group for the response
+  let stateGroup: string | null = null;
+  if (issue.stateId) {
+    const state = await db.query.states.findFirst({
+      where: eq(states.id, issue.stateId),
+    });
+    stateGroup = state?.group ?? null;
+  }
 
   return c.json(formatIssue(issue, {
-    assigneeIds,
-    labelIds,
+    assigneeIds: assigneeList,
+    labelIds: labelList,
     moduleIds: [],
     cycleId: null,
     subIssuesCount: 0,
     attachmentCount: 0,
     linkCount: 0,
-    stateGroup: null,
+    stateGroup,
   }), 201);
 });
 
@@ -924,13 +971,16 @@ issueRoutes.patch("/:issueId/", requireProjectMember, zValidator("json", updateI
   if (body.name !== undefined) updateData.name = body.name;
   if (body.description_html !== undefined) updateData.descriptionHtml = body.description_html;
   if (body.description_stripped !== undefined) updateData.descriptionStripped = body.description_stripped;
-  if (body.priority !== undefined) updateData.priority = body.priority;
+  if (body.priority !== undefined) updateData.priority = body.priority ?? 0;
   if (body.state_id !== undefined) updateData.stateId = body.state_id;
   if (body.parent_id !== undefined) updateData.parentId = body.parent_id;
   if (body.start_date !== undefined) updateData.startDate = parseDate(body.start_date);
   if (body.target_date !== undefined) updateData.targetDate = parseDate(body.target_date);
   if (body.sort_order !== undefined) updateData.sortOrder = body.sort_order;
-  if (body.estimate_point !== undefined) updateData.estimatePoint = body.estimate_point;
+  if (body.estimate_point !== undefined) {
+    const ep = body.estimate_point != null ? Number(body.estimate_point) : null;
+    updateData.estimatePoint = isNaN(ep as number) ? null : ep;
+  }
 
   // Check if state changed to completed
   if (body.state_id && body.state_id !== issue.stateId) {
@@ -947,12 +997,14 @@ issueRoutes.patch("/:issueId/", requireProjectMember, zValidator("json", updateI
 
   await db.update(issues).set(updateData).where(eq(issues.id, issueId));
 
-  // Sync assignees/labels if provided
-  if (body.assignees !== undefined) {
-    await syncAssignees(issueId, body.assignees ?? []);
+  // Sync assignees/labels if provided (accept both field name styles)
+  const assigneeUpdate = body.assignees ?? body.assignee_ids;
+  const labelUpdate = body.labels ?? body.label_ids;
+  if (assigneeUpdate !== undefined) {
+    await syncAssignees(issueId, assigneeUpdate ?? []);
   }
-  if (body.labels !== undefined) {
-    await syncLabels(issueId, body.labels ?? []);
+  if (labelUpdate !== undefined) {
+    await syncLabels(issueId, labelUpdate ?? []);
   }
 
   // Record activity
