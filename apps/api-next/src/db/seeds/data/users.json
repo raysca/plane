@@ -1,0 +1,79 @@
+[
+  {
+    "id": 1,
+    "email": "alice.chen@example.com",
+    "first_name": "Alice",
+    "last_name": "Chen",
+    "display_name": "Alice Chen",
+    "username": "alicechen",
+    "role": "Product Manager",
+    "workspace_role": 20,
+    "project_role": 20
+  },
+  {
+    "id": 2,
+    "email": "bob.martinez@example.com",
+    "first_name": "Bob",
+    "last_name": "Martinez",
+    "display_name": "Bob Martinez",
+    "username": "bobmartinez",
+    "role": "Engineering Lead",
+    "workspace_role": 15,
+    "project_role": 15
+  },
+  {
+    "id": 3,
+    "email": "carol.nguyen@example.com",
+    "first_name": "Carol",
+    "last_name": "Nguyen",
+    "display_name": "Carol Nguyen",
+    "username": "carolnguyen",
+    "role": "Frontend Developer",
+    "workspace_role": 15,
+    "project_role": 15
+  },
+  {
+    "id": 4,
+    "email": "david.kim@example.com",
+    "first_name": "David",
+    "last_name": "Kim",
+    "display_name": "David Kim",
+    "username": "davidkim",
+    "role": "Backend Developer",
+    "workspace_role": 15,
+    "project_role": 15
+  },
+  {
+    "id": 5,
+    "email": "eva.patel@example.com",
+    "first_name": "Eva",
+    "last_name": "Patel",
+    "display_name": "Eva Patel",
+    "username": "evapatel",
+    "role": "Designer",
+    "workspace_role": 15,
+    "project_role": 15
+  },
+  {
+    "id": 6,
+    "email": "frank.wright@example.com",
+    "first_name": "Frank",
+    "last_name": "Wright",
+    "display_name": "Frank Wright",
+    "username": "frankwright",
+    "role": "QA Engineer",
+    "workspace_role": 10,
+    "project_role": 10
+  },
+  {
+    "id": 7,
+    "email": "grace.lee@example.com",
+    "first_name": "Grace",
+    "last_name": "Lee",
+    "display_name": "Grace Lee",
+    "username": "gracelee",
+    "role": "DevOps",
+    "workspace_role": 15,
+    "project_role": 15
+  }
+]

@@ -20,7 +20,7 @@ import {
 } from "drizzle-orm";
 import { db } from "../../db";
 import { users } from "../../db/schema/user";
-import { projects, states, labels as projectLabels } from "../../db/schema/project";
+import { projects, states, labels as projectLabels, projectMembers } from "../../db/schema/project";
 import {
   issues,
   issueAssignees,
@@ -121,14 +121,17 @@ const createCommentSchema = z.object({
   comment_html: z.string().optional(),
   comment_stripped: z.string().optional(),
   comment_json: z.record(z.string(), z.unknown()).optional(),
-  access_level: z.number().int().min(0).max(1).optional(),
+  access: z.enum(["INTERNAL", "EXTERNAL"]).optional(),
+  parent_id: z.string().optional().nullable(),
+  external_source: z.string().optional().nullable(),
+  external_id: z.string().optional().nullable(),
 });
 
 const updateCommentSchema = z.object({
   comment_html: z.string().optional(),
   comment_stripped: z.string().optional(),
   comment_json: z.record(z.string(), z.unknown()).optional(),
-  access_level: z.number().int().min(0).max(1).optional(),
+  access: z.enum(["INTERNAL", "EXTERNAL"]).optional(),
 });
 
 const createReactionSchema = z.object({
@@ -286,17 +289,74 @@ function formatIssue(
   };
 }
 
-function formatComment(c: typeof issueComments.$inferSelect) {
+interface CommentExtra {
+  actorDetail?: {
+    id: string;
+    display_name: string;
+    first_name: string;
+    last_name: string;
+    avatar_url: string | null;
+    is_bot: boolean;
+  } | null;
+  commentReactions?: Array<{
+    id: string;
+    comment_id: string;
+    actor_id: string;
+    reaction: string;
+    created_at: string | null;
+    actor_detail?: {
+      id: string;
+      display_name: string;
+      first_name: string;
+      last_name: string;
+      avatar_url: string | null;
+      is_bot: boolean;
+    } | null;
+  }>;
+  workspaceDetail?: {
+    id: string;
+    name: string;
+    slug: string;
+  } | null;
+  projectDetail?: {
+    id: string;
+    identifier: string;
+    name: string;
+  } | null;
+  issueDetail?: {
+    id: string;
+    sequence_id: number | null;
+    name: string;
+  } | null;
+  isMember?: boolean;
+}
+
+function formatComment(c: typeof issueComments.$inferSelect, extra?: CommentExtra) {
   return {
     id: c.id,
-    issue_id: c.issueId,
-    actor_id: c.actorId,
+    issue: c.issueId,
+    workspace: c.workspaceId,
+    project: c.projectId,
+    actor: c.actorId,
     comment_html: c.commentHtml ?? "",
     comment_stripped: c.commentStripped ?? "",
     comment_json: c.commentJson ?? null,
-    access_level: c.accessLevel ?? 0,
+    attachments: [],
+    access: c.access ?? "INTERNAL",
+    parent: c.parentId ?? null,
+    edited_at: c.editedAt?.toISOString() ?? null,
+    external_source: c.externalSource ?? null,
+    external_id: c.externalId ?? null,
+    created_by: c.createdById ?? null,
+    updated_by: c.updatedById ?? null,
     created_at: c.createdAt?.toISOString() ?? null,
     updated_at: c.updatedAt?.toISOString() ?? null,
+    actor_detail: extra?.actorDetail ?? null,
+    comment_reactions: extra?.commentReactions ?? [],
+    workspace_detail: extra?.workspaceDetail ?? null,
+    project_detail: extra?.projectDetail ?? null,
+    issue_detail: extra?.issueDetail ?? null,
+    is_member: extra?.isMember ?? false,
   };
 }
 
@@ -1074,8 +1134,147 @@ issueRoutes.delete("/:issueId/", requireProjectMember, async (c) => {
 // 5.4 Issue Comments
 // =====================================================
 
+// Helper to build comment extras (actor_detail, reactions, workspace/project/issue details)
+async function buildCommentExtras(
+  commentRows: (typeof issueComments.$inferSelect)[],
+  opts: {
+    workspace: { id: string; name: string; slug: string } | null;
+    project: { id: string; name: string; identifier: string } | null;
+    userId: string;
+    issueId: string;
+  }
+) {
+  const commentIds = commentRows.map((c) => c.id);
+  const actorIds = [...new Set(commentRows.map((c) => c.actorId))];
+
+  // Batch fetch actors and reactions in parallel
+  const [actorRows, reactionRows, reactionActorRows, issueRow, membershipExists] = await Promise.all([
+    actorIds.length > 0
+      ? db
+          .select({
+            id: users.id,
+            displayName: users.displayName,
+            firstName: users.name,
+            avatar: users.avatar,
+          })
+          .from(users)
+          .where(inArray(users.id, actorIds))
+      : [],
+    commentIds.length > 0
+      ? db
+          .select()
+          .from(commentReactions)
+          .where(inArray(commentReactions.commentId, commentIds))
+      : [],
+    // We'll get reaction actor details after we have reaction rows
+    Promise.resolve([]),
+    db.query.issues.findFirst({
+      where: eq(issues.id, opts.issueId),
+    }),
+    db.query.projectMembers.findFirst({
+      where: and(
+        eq(projectMembers.projectId, opts.project?.id ?? ""),
+        eq(projectMembers.memberId, opts.userId)
+      ),
+    }),
+  ]);
+
+  // Get unique actor IDs from reactions
+  const reactionActorIds = [...new Set(reactionRows.map((r) => r.actorId))];
+  const allReactionActors =
+    reactionActorIds.length > 0
+      ? await db
+          .select({
+            id: users.id,
+            displayName: users.displayName,
+            firstName: users.name,
+            avatar: users.avatar,
+          })
+          .from(users)
+          .where(inArray(users.id, reactionActorIds))
+      : [];
+
+  // Build lookup maps
+  const actorMap = new Map(
+    actorRows.map((a) => [
+      a.id,
+      {
+        id: a.id,
+        display_name: a.displayName ?? a.firstName ?? "",
+        first_name: a.firstName ?? "",
+        last_name: "",
+        avatar_url: a.avatar ?? null,
+        is_bot: false,
+      },
+    ])
+  );
+
+  const reactionActorMap = new Map(
+    allReactionActors.map((a) => [
+      a.id,
+      {
+        id: a.id,
+        display_name: a.displayName ?? a.firstName ?? "",
+        first_name: a.firstName ?? "",
+        last_name: "",
+        avatar_url: a.avatar ?? null,
+        is_bot: false,
+      },
+    ])
+  );
+
+  const reactionsByComment = new Map<string, typeof reactionRows>();
+  for (const r of reactionRows) {
+    const arr = reactionsByComment.get(r.commentId) ?? [];
+    arr.push(r);
+    reactionsByComment.set(r.commentId, arr);
+  }
+
+  const workspaceDetail = opts.workspace
+    ? { id: opts.workspace.id, name: opts.workspace.name, slug: opts.workspace.slug }
+    : null;
+
+  const projectDetail = opts.project
+    ? { id: opts.project.id, identifier: opts.project.identifier, name: opts.project.name }
+    : null;
+
+  const issueDetail = issueRow
+    ? { id: issueRow.id, sequence_id: issueRow.sequenceId, name: issueRow.name }
+    : null;
+
+  const isMember = !!membershipExists;
+
+  // Build extras map by comment ID
+  const extrasMap = new Map<string, CommentExtra>();
+  for (const c of commentRows) {
+    const reactions = reactionsByComment.get(c.id) ?? [];
+    extrasMap.set(c.id, {
+      actorDetail: actorMap.get(c.actorId) ?? null,
+      commentReactions: reactions.map((r) => ({
+        id: r.id,
+        comment_id: r.commentId,
+        actor_id: r.actorId,
+        reaction: r.reaction,
+        created_at: r.createdAt?.toISOString() ?? null,
+        actor_detail: reactionActorMap.get(r.actorId) ?? null,
+      })),
+      workspaceDetail,
+      projectDetail,
+      issueDetail,
+      isMember,
+    });
+  }
+
+  return extrasMap;
+}
+
 // GET /:issueId/comments/ - List comments
 issueRoutes.get("/:issueId/comments/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
   const issueId = c.req.param("issueId");
 
   const comments = await db.query.issueComments.findMany({
@@ -1083,7 +1282,43 @@ issueRoutes.get("/:issueId/comments/", async (c) => {
     orderBy: [asc(issueComments.createdAt)],
   });
 
-  return c.json(comments.map(formatComment));
+  const extrasMap = await buildCommentExtras(comments, {
+    workspace,
+    project,
+    userId: user.id,
+    issueId,
+  });
+
+  return c.json(comments.map((c) => formatComment(c, extrasMap.get(c.id))));
+});
+
+// GET /:issueId/comments/:commentId/ - Get single comment
+issueRoutes.get("/:issueId/comments/:commentId/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const issueId = c.req.param("issueId");
+  const commentId = c.req.param("commentId");
+
+  const comment = await db.query.issueComments.findFirst({
+    where: and(
+      eq(issueComments.id, commentId),
+      eq(issueComments.issueId, issueId)
+    ),
+  });
+
+  if (!comment) return c.json({ detail: "Comment not found." }, 404);
+
+  const extrasMap = await buildCommentExtras([comment], {
+    workspace,
+    project,
+    userId: user.id,
+    issueId,
+  });
+
+  return c.json(formatComment(comment, extrasMap.get(comment.id)));
 });
 
 // POST /:issueId/comments/ - Create comment
@@ -1096,15 +1331,38 @@ issueRoutes.post("/:issueId/comments/", requireProjectMember, zValidator("json",
   const issueId = c.req.param("issueId");
   const body = c.req.valid("json");
 
+  // Check guest permissions - guests can only comment on issues they created
+  const workspaceMembership = c.get("workspaceMembership");
+  const projectMembership = c.get("projectMembership");
+  if (
+    projectMembership &&
+    projectMembership.role === ROLES.GUEST &&
+    workspaceMembership?.role !== ROLES.ADMIN
+  ) {
+    const issue = await db.query.issues.findFirst({
+      where: and(eq(issues.id, issueId), eq(issues.projectId, project.id)),
+    });
+    if (issue && issue.createdById !== user.id) {
+      return c.json({ error: "You are not allowed to comment on this issue" }, 400);
+    }
+  }
+
   const result = await db
     .insert(issueComments)
     .values({
       issueId,
+      projectId: project.id,
+      workspaceId: workspace.id,
       actorId: user.id,
       commentHtml: body.comment_html,
       commentStripped: body.comment_stripped,
       commentJson: body.comment_json,
-      accessLevel: body.access_level ?? 0,
+      access: body.access ?? "INTERNAL",
+      parentId: body.parent_id ?? null,
+      externalSource: body.external_source ?? null,
+      externalId: body.external_id ?? null,
+      createdById: user.id,
+      updatedById: user.id,
     })
     .returning();
 
@@ -1118,11 +1376,23 @@ issueRoutes.post("/:issueId/comments/", requireProjectMember, zValidator("json",
     newValue: result[0]!.id,
   });
 
-  return c.json(formatComment(result[0]!), 201);
+  const extrasMap = await buildCommentExtras([result[0]!], {
+    workspace,
+    project,
+    userId: user.id,
+    issueId,
+  });
+
+  return c.json(formatComment(result[0]!, extrasMap.get(result[0]!.id)), 201);
 });
 
 // PATCH /:issueId/comments/:commentId/ - Update comment
 issueRoutes.patch("/:issueId/comments/:commentId/", requireProjectMember, zValidator("json", updateCommentSchema), async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
   const issueId = c.req.param("issueId");
   const commentId = c.req.param("commentId");
 
@@ -1135,25 +1405,65 @@ issueRoutes.patch("/:issueId/comments/:commentId/", requireProjectMember, zValid
 
   if (!comment) return c.json({ detail: "Comment not found." }, 404);
 
+  // Permission check: only admin or creator can edit
+  const workspaceMembership = c.get("workspaceMembership");
+  if (
+    comment.actorId !== user.id &&
+    comment.createdById !== user.id &&
+    workspaceMembership?.role !== ROLES.ADMIN
+  ) {
+    return c.json({ detail: "You do not have permission to perform this action." }, 403);
+  }
+
   const body = c.req.valid("json");
-  const updateData: Record<string, unknown> = { updatedAt: new Date() };
+  const updateData: Record<string, unknown> = {
+    updatedAt: new Date(),
+    updatedById: user.id,
+  };
 
   if (body.comment_html !== undefined) updateData.commentHtml = body.comment_html;
   if (body.comment_stripped !== undefined) updateData.commentStripped = body.comment_stripped;
   if (body.comment_json !== undefined) updateData.commentJson = body.comment_json;
-  if (body.access_level !== undefined) updateData.accessLevel = body.access_level;
+  if (body.access !== undefined) updateData.access = body.access;
+
+  // Track edited_at if comment content changed
+  if (body.comment_html !== undefined && body.comment_html !== comment.commentHtml) {
+    updateData.editedAt = new Date();
+  }
 
   await db.update(issueComments).set(updateData).where(eq(issueComments.id, commentId));
+
+  await recordActivity({
+    issueId,
+    projectId: project.id,
+    workspaceId: workspace.id,
+    actorId: user.id,
+    field: "comment",
+    verb: "updated",
+    newValue: commentId,
+  });
 
   const updated = await db.query.issueComments.findFirst({
     where: eq(issueComments.id, commentId),
   });
 
-  return c.json(formatComment(updated!));
+  const extrasMap = await buildCommentExtras([updated!], {
+    workspace,
+    project,
+    userId: user.id,
+    issueId,
+  });
+
+  return c.json(formatComment(updated!, extrasMap.get(updated!.id)));
 });
 
 // DELETE /:issueId/comments/:commentId/ - Delete comment
 issueRoutes.delete("/:issueId/comments/:commentId/", requireProjectMember, async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
   const issueId = c.req.param("issueId");
   const commentId = c.req.param("commentId");
 
@@ -1166,7 +1476,27 @@ issueRoutes.delete("/:issueId/comments/:commentId/", requireProjectMember, async
 
   if (!comment) return c.json({ detail: "Comment not found." }, 404);
 
+  // Permission check: only admin or creator can delete
+  const workspaceMembership = c.get("workspaceMembership");
+  if (
+    comment.actorId !== user.id &&
+    comment.createdById !== user.id &&
+    workspaceMembership?.role !== ROLES.ADMIN
+  ) {
+    return c.json({ detail: "You do not have permission to perform this action." }, 403);
+  }
+
   await db.delete(issueComments).where(eq(issueComments.id, commentId));
+
+  await recordActivity({
+    issueId,
+    projectId: project.id,
+    workspaceId: workspace.id,
+    actorId: user.id,
+    field: "comment",
+    verb: "deleted",
+    oldValue: commentId,
+  });
 
   return new Response(null, { status: 204 });
 });

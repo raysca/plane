@@ -1,6 +1,6 @@
 
 import { db } from "../db";
-import { users } from "../db/schema/user";
+import { users, userProfiles } from "../db/schema/user";
 import {
     workspaces,
     workspaceMembers,
@@ -39,6 +39,18 @@ import path from "path";
 import fs from "fs/promises";
 
 // Types for seed data
+type SeedUser = {
+    id: number;
+    email: string;
+    first_name: string;
+    last_name: string;
+    display_name: string;
+    username: string;
+    role: string;
+    workspace_role: number;
+    project_role: number;
+};
+
 type SeedProject = {
     id: number;
     name: string;
@@ -97,6 +109,7 @@ type SeedIssue = {
     labels: number[];
     cycle_id?: number | null;
     module_ids?: number[];
+    assignee_ids?: number[];
 };
 
 type SeedView = {
@@ -208,6 +221,64 @@ export async function seedWorkspace(workspaceId: string, userId: string) {
 
         if (!workspace) throw new Error("Workspace not found");
 
+        // 1. Create Seed Users
+        const userSeeds = await readSeedFile<SeedUser[]>("users.json");
+        const userMap: Record<number, string> = {};
+
+        if (userSeeds?.length) {
+            for (const seed of userSeeds) {
+                const existingUser = await db.query.users.findFirst({
+                    where: eq(users.email, seed.email),
+                });
+
+                let seedUserId: string;
+
+                if (existingUser) {
+                    seedUserId = existingUser.id;
+                    console.log(`[Seeder] User ${seed.email} already exists, reusing`);
+                } else {
+                    const [newUser] = await db.insert(users).values({
+                        email: seed.email,
+                        emailVerified: true,
+                        name: seed.display_name,
+                        firstName: seed.first_name,
+                        lastName: seed.last_name,
+                        displayName: seed.display_name,
+                        username: seed.username,
+                        isActive: true,
+                    }).returning();
+
+                    if (!newUser) continue;
+                    seedUserId = newUser.id;
+
+                    // Create user profile
+                    await db.insert(userProfiles).values({
+                        userId: seedUserId,
+                        isOnboarded: true,
+                        role: seed.role,
+                    });
+
+                    console.log(`[Seeder] Created user ${seed.display_name} (${seed.email})`);
+                }
+
+                userMap[seed.id] = seedUserId;
+
+                // Add as workspace member (skip if already a member)
+                const existingWsMember = await db.query.workspaceMembers.findFirst({
+                    where: (wm, { and, eq: e }) =>
+                        and(e(wm.workspaceId, workspace.id), e(wm.userId, seedUserId)),
+                });
+
+                if (!existingWsMember) {
+                    await db.insert(workspaceMembers).values({
+                        workspaceId: workspace.id,
+                        userId: seedUserId,
+                        role: seed.workspace_role,
+                    });
+                }
+            }
+        }
+
         // 2. Create Project
         const projectSeeds = await readSeedFile<SeedProject[]>("projects.json");
         if (!projectSeeds?.length) return;
@@ -234,12 +305,26 @@ export async function seedWorkspace(workspaceId: string, userId: string) {
             projectMap[seed.id] = newProject.id;
             console.log(`[Seeder] Created project ${newProject.name} (${newProject.id})`);
 
-            // Add user as member
+            // Add calling user as admin member
             await db.insert(projectMembers).values({
                 projectId: newProject.id,
                 memberId: userId,
                 role: 20, // Admin
             });
+
+            // Add seed users as project members
+            if (userSeeds?.length) {
+                for (const userSeed of userSeeds) {
+                    const seedUserId = userMap[userSeed.id];
+                    if (!seedUserId || seedUserId === userId) continue;
+
+                    await db.insert(projectMembers).values({
+                        projectId: newProject.id,
+                        memberId: seedUserId,
+                        role: userSeed.project_role,
+                    });
+                }
+            }
         }
 
         // 3. Create States
@@ -418,6 +503,19 @@ export async function seedWorkspace(workspaceId: string, userId: string) {
                             await db.insert(moduleIssues).values({
                                 issueId: newIssue.id,
                                 moduleId: moduleId
+                            });
+                        }
+                    }
+                }
+
+                // Issue Assignees
+                if (seed.assignee_ids && seed.assignee_ids.length) {
+                    for (const assigneeId of seed.assignee_ids) {
+                        const mappedUserId = userMap[assigneeId];
+                        if (mappedUserId) {
+                            await db.insert(issueAssignees).values({
+                                issueId: newIssue.id,
+                                assigneeId: mappedUserId,
                             });
                         }
                     }

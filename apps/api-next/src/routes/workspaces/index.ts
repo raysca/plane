@@ -26,8 +26,9 @@ import { generateSlug, isValidSlug } from "../../lib/utils";
 import { seedWorkspace } from "../../lib/workspace-seeder";
 import { userProfiles } from "../../db/schema/user";
 import { notifications } from "../../db/schema/notification";
-import { issues, issueAssignees, issueActivities, issueSubscribers, issueLabels, issueLinks, issueAttachments } from "../../db/schema/issue";
-import { projects, projectMembers, states, labels } from "../../db/schema/project";
+import { issues, issueAssignees, issueActivities, issueSubscribers, issueLabels, issueLinks, issueAttachments, issueReactions } from "../../db/schema/issue";
+import { fileAssets } from "../../db/schema/asset";
+import { projects, projectMembers, states, labels, estimates, estimatePoints } from "../../db/schema/project";
 import { pages } from "../../db/schema/page";
 import { cycles, cycleIssues, cycleFavorites } from "../../db/schema/cycle";
 import { modules, moduleIssues, moduleMembers, moduleFavorites, moduleLinks } from "../../db/schema/module";
@@ -4055,6 +4056,374 @@ workspaceRoutes.get("/:slug/user-issues/:userId/", async (c) => {
     extra_stats: null,
     results: paginatedIssues,
   });
+});
+
+// GET /:slug/estimates/ - Get all workspace estimates (estimates linked to projects in this workspace)
+workspaceRoutes.get("/:slug/estimates/", workspaceMiddleware, async (c) => {
+  const workspace = c.get("workspace");
+  if (!workspace) return c.json({ detail: "Not found." }, 404);
+
+  // Get all project estimate IDs in this workspace
+  const projectEstimates = await db
+    .select({ estimateId: projects.estimateId })
+    .from(projects)
+    .where(
+      and(
+        eq(projects.workspaceId, workspace.id),
+        isNotNull(projects.estimateId)
+      )
+    );
+
+  const estimateIds = projectEstimates
+    .map((p) => p.estimateId)
+    .filter((id): id is string => id !== null);
+
+  if (estimateIds.length === 0) {
+    return c.json([]);
+  }
+
+  const estimateList = await db.query.estimates.findMany({
+    where: and(
+      inArray(estimates.id, estimateIds),
+      eq(estimates.workspaceId, workspace.id)
+    ),
+    orderBy: [asc(estimates.name)],
+  });
+
+  const allPoints = await db.query.estimatePoints.findMany({
+    where: inArray(estimatePoints.estimateId, estimateIds),
+    orderBy: [asc(estimatePoints.key)],
+  });
+
+  const pointsByEstimate = new Map<string, (typeof allPoints)[number][]>();
+  for (const point of allPoints) {
+    const existing = pointsByEstimate.get(point.estimateId) ?? [];
+    existing.push(point);
+    pointsByEstimate.set(point.estimateId, existing);
+  }
+
+  const results = estimateList.map((e) => ({
+    id: e.id,
+    project_id: e.projectId,
+    workspace_id: e.workspaceId,
+    name: e.name,
+    description: e.description ?? "",
+    type: e.type ?? "categories",
+    created_by_id: e.createdById ?? null,
+    created_at: e.createdAt?.toISOString() ?? null,
+    updated_at: e.updatedAt?.toISOString() ?? null,
+    points: (pointsByEstimate.get(e.id) ?? []).map((p) => ({
+      id: p.id,
+      estimate_id: p.estimateId,
+      key: p.key,
+      value: p.value,
+      description: p.description ?? "",
+      created_at: p.createdAt?.toISOString() ?? null,
+      updated_at: p.updatedAt?.toISOString() ?? null,
+    })),
+  }));
+
+  return c.json(results);
+});
+
+// GET /:slug/work-items/:identifier/ - Get issue by project identifier + sequence (e.g. APPLE-1)
+workspaceRoutes.get("/:slug/work-items/:identifier/", workspaceMiddleware, async (c) => {
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const identifier = c.req.param("identifier");
+
+  // Parse "PROJECT-123" into project identifier and sequence number
+  const dashIndex = identifier.lastIndexOf("-");
+  if (dashIndex === -1) {
+    return c.json({ error: "Invalid issue identifier" }, 400);
+  }
+  const projectIdentifier = identifier.substring(0, dashIndex);
+  const sequenceStr = identifier.substring(dashIndex + 1);
+
+  // Validate sequence is a valid integer
+  if (!/^\d+$/.test(sequenceStr)) {
+    return c.json({ error: "Invalid issue identifier" }, 400);
+  }
+  const sequenceId = parseInt(sequenceStr, 10);
+
+  // Fetch the project by identifier (case-insensitive)
+  const project = await db.query.projects.findFirst({
+    where: and(
+      sql`LOWER(${projects.identifier}) = LOWER(${projectIdentifier})`,
+      eq(projects.workspaceId, workspace.id)
+    ),
+  });
+
+  if (!project) {
+    return c.json({ error: "The required object does not exist." }, 404);
+  }
+
+  // Check if user is an active project member
+  const membership = await db.query.projectMembers.findFirst({
+    where: and(
+      eq(projectMembers.projectId, project.id),
+      eq(projectMembers.memberId, user.id),
+      eq(projectMembers.isActive, true)
+    ),
+  });
+
+  if (!membership) {
+    return c.json({ error: "You are not allowed to view this issue" }, 403);
+  }
+
+  // Fetch the issue by sequence_id
+  const issue = await db.query.issues.findFirst({
+    where: and(
+      eq(issues.projectId, project.id),
+      eq(issues.workspaceId, workspace.id),
+      eq(issues.sequenceId, sequenceId),
+      isNull(issues.deletedAt)
+    ),
+  });
+
+  if (!issue) {
+    return c.json({ error: "The required object does not exist." }, 404);
+  }
+
+  // Guest permission check
+  if (
+    membership.role === 5 &&
+    !project.guestViewAllFeatures &&
+    issue.createdById !== user.id
+  ) {
+    return c.json({ error: "You are not allowed to view this issue" }, 403);
+  }
+
+  // Fetch all related data in parallel
+  const [
+    assigneeRows,
+    labelRows,
+    moduleRows,
+    cycleRow,
+    subIssuesCountResult,
+    linkCountResult,
+    attachmentCountResult,
+    subscriberRow,
+  ] = await Promise.all([
+    // Assignee IDs
+    db
+      .select({ assigneeId: issueAssignees.assigneeId })
+      .from(issueAssignees)
+      .where(eq(issueAssignees.issueId, issue.id)),
+    // Label IDs
+    db
+      .select({ labelId: issueLabels.labelId })
+      .from(issueLabels)
+      .where(eq(issueLabels.issueId, issue.id)),
+    // Module IDs (only non-archived, non-deleted)
+    db
+      .select({ moduleId: moduleIssues.moduleId })
+      .from(moduleIssues)
+      .innerJoin(modules, eq(modules.id, moduleIssues.moduleId))
+      .where(
+        and(
+          eq(moduleIssues.issueId, issue.id),
+          isNull(modules.archivedAt)
+        )
+      ),
+    // Cycle ID
+    db
+      .select({ cycleId: cycleIssues.cycleId })
+      .from(cycleIssues)
+      .where(eq(cycleIssues.issueId, issue.id))
+      .limit(1),
+    // Sub-issues count
+    db
+      .select({ count: count() })
+      .from(issues)
+      .where(
+        and(
+          eq(issues.parentId, issue.id),
+          isNull(issues.deletedAt)
+        )
+      ),
+    // Link count
+    db
+      .select({ count: count() })
+      .from(issueLinks)
+      .where(eq(issueLinks.issueId, issue.id)),
+    // Attachment count
+    db
+      .select({ count: count() })
+      .from(fileAssets)
+      .where(
+        and(
+          eq(fileAssets.entityIdentifier, issue.id),
+          eq(fileAssets.entityType, "issue_attachment"),
+          eq(fileAssets.isDeleted, false)
+        )
+      ),
+    // Is subscribed
+    db.query.issueSubscribers.findFirst({
+      where: and(
+        eq(issueSubscribers.issueId, issue.id),
+        eq(issueSubscribers.subscriberId, user.id)
+      ),
+    }),
+  ]);
+
+  const assigneeIds = assigneeRows.map((r) => r.assigneeId);
+  const labelIds = labelRows.map((r) => r.labelId);
+  const moduleIds = moduleRows.map((r) => r.moduleId);
+  const cycleId = cycleRow[0]?.cycleId ?? null;
+  const subIssuesCount = subIssuesCountResult[0]?.count ?? 0;
+  const linkCount = linkCountResult[0]?.count ?? 0;
+  const attachmentCount = attachmentCountResult[0]?.count ?? 0;
+  const isSubscribed = !!subscriberRow;
+
+  // Build the base response (matching IssueDetailSerializer)
+  const result: Record<string, unknown> = {
+    id: issue.id,
+    project_id: issue.projectId,
+    workspace_id: issue.workspaceId,
+    parent_id: issue.parentId ?? null,
+    state_id: issue.stateId ?? null,
+    name: issue.name,
+    description_html: issue.descriptionHtml ?? "",
+    priority: issue.priority ?? 0,
+    sort_order: issue.sortOrder ?? 65535,
+    start_date: issue.startDate?.toISOString()?.split("T")[0] ?? null,
+    target_date: issue.targetDate?.toISOString()?.split("T")[0] ?? null,
+    completed_at: issue.completedAt?.toISOString() ?? null,
+    archived_at: issue.archivedAt?.toISOString() ?? null,
+    sequence_id: issue.sequenceId ?? null,
+    estimate_point: issue.estimatePoint ?? null,
+    is_draft: false,
+    is_epic: issue.isEpic ?? false,
+    assignee_ids: assigneeIds,
+    label_ids: labelIds,
+    module_ids: moduleIds,
+    cycle_id: cycleId,
+    sub_issues_count: subIssuesCount,
+    attachment_count: attachmentCount,
+    link_count: linkCount,
+    is_subscribed: isSubscribed,
+    is_intake: false,
+    created_by: issue.createdById ?? null,
+    updated_by: issue.updatedById ?? null,
+    created_at: issue.createdAt?.toISOString() ?? null,
+    updated_at: issue.updatedAt?.toISOString() ?? null,
+  };
+
+  // Handle expand parameter
+  const expandParam = c.req.query("expand") ?? "";
+  const expandFields = expandParam.split(",").map((s) => s.trim()).filter(Boolean);
+
+  if (expandFields.includes("issue_reactions")) {
+    const reactions = await db
+      .select()
+      .from(issueReactions)
+      .where(eq(issueReactions.issueId, issue.id));
+    result.issue_reactions = reactions.map((r) => ({
+      id: r.id,
+      issue: r.issueId,
+      actor: r.actorId,
+      reaction: r.reaction,
+      created_at: r.createdAt?.toISOString() ?? null,
+    }));
+  }
+
+  if (expandFields.includes("issue_link")) {
+    const links = await db
+      .select()
+      .from(issueLinks)
+      .where(eq(issueLinks.issueId, issue.id));
+    result.issue_link = links.map((l) => ({
+      id: l.id,
+      issue: l.issueId,
+      title: l.title ?? "",
+      url: l.url,
+      metadata: l.metadata ?? {},
+      created_by: l.createdById ?? null,
+      created_at: l.createdAt?.toISOString() ?? null,
+    }));
+  }
+
+  if (expandFields.includes("issue_attachments")) {
+    const attachments = await db
+      .select()
+      .from(fileAssets)
+      .where(
+        and(
+          eq(fileAssets.entityIdentifier, issue.id),
+          eq(fileAssets.entityType, "issue_attachment"),
+          eq(fileAssets.isDeleted, false)
+        )
+      );
+    result.issue_attachments = attachments.map((a) => ({
+      id: a.id,
+      asset: a.asset,
+      attributes: a.attributes ?? {},
+      size: a.size ?? 0,
+      is_uploaded: a.isUploaded ?? false,
+      created_by: a.createdById ?? null,
+      created_at: a.createdAt?.toISOString() ?? null,
+      updated_at: a.updatedAt?.toISOString() ?? null,
+    }));
+  }
+
+  if (expandFields.includes("parent") && issue.parentId) {
+    const parent = await db.query.issues.findFirst({
+      where: and(
+        eq(issues.id, issue.parentId),
+        isNull(issues.deletedAt)
+      ),
+    });
+    if (parent) {
+      const parentAssignees = await db
+        .select({ assigneeId: issueAssignees.assigneeId })
+        .from(issueAssignees)
+        .where(eq(issueAssignees.issueId, parent.id));
+      const parentLabels = await db
+        .select({ labelId: issueLabels.labelId })
+        .from(issueLabels)
+        .where(eq(issueLabels.issueId, parent.id));
+
+      result.parent = {
+        id: parent.id,
+        project_id: parent.projectId,
+        workspace_id: parent.workspaceId,
+        parent_id: parent.parentId ?? null,
+        state_id: parent.stateId ?? null,
+        name: parent.name,
+        priority: parent.priority ?? 0,
+        sort_order: parent.sortOrder ?? 65535,
+        start_date: parent.startDate?.toISOString()?.split("T")[0] ?? null,
+        target_date: parent.targetDate?.toISOString()?.split("T")[0] ?? null,
+        completed_at: parent.completedAt?.toISOString() ?? null,
+        archived_at: parent.archivedAt?.toISOString() ?? null,
+        sequence_id: parent.sequenceId ?? null,
+        estimate_point: parent.estimatePoint ?? null,
+        is_epic: parent.isEpic ?? false,
+        assignee_ids: parentAssignees.map((r) => r.assigneeId),
+        label_ids: parentLabels.map((r) => r.labelId),
+        created_by: parent.createdById ?? null,
+        updated_by: parent.updatedById ?? null,
+        created_at: parent.createdAt?.toISOString() ?? null,
+        updated_at: parent.updatedAt?.toISOString() ?? null,
+      };
+    } else {
+      result.parent = null;
+    }
+  }
+
+  // Track recent visit (fire and forget)
+  db.insert(recentVisits).values({
+    workspaceId: workspace.id,
+    entityType: "issue",
+    entityId: issue.id,
+    userId: user.id,
+    visitedAt: new Date(),
+  }).catch(() => {});
+
+  return c.json(result);
 });
 
 export { workspaceRoutes };

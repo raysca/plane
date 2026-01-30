@@ -102,19 +102,33 @@ export const issueComments = sqliteTable(
     issueId: text("issue_id")
       .notNull()
       .references(() => issues.id, { onDelete: "cascade" }),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
     actorId: text("actor_id")
       .notNull()
       .references(() => users.id),
     commentHtml: text("comment_html"),
     commentStripped: text("comment_stripped"),
     commentJson: text("comment_json", { mode: "json" }),
-    accessLevel: integer("access_level").default(0), // 0=Internal, 1=External
+    access: text("access").default("INTERNAL"), // "INTERNAL" or "EXTERNAL"
+    parentId: text("parent_id"),
+    editedAt: integer("edited_at", { mode: "timestamp" }),
+    externalSource: text("external_source"),
+    externalId: text("external_id"),
+    createdById: text("created_by_id").references(() => users.id),
+    updatedById: text("updated_by_id").references(() => users.id),
     createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
     updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
   },
   (table) => [
     index("issue_comment_issue_idx").on(table.issueId),
     index("issue_comment_actor_idx").on(table.actorId),
+    index("issue_comment_project_idx").on(table.projectId),
+    index("issue_comment_workspace_idx").on(table.workspaceId),
   ]
 );
 
@@ -342,9 +356,34 @@ export const issueCommentsRelations = relations(issueComments, ({ one, many }) =
     fields: [issueComments.issueId],
     references: [issues.id],
   }),
+  project: one(projects, {
+    fields: [issueComments.projectId],
+    references: [projects.id],
+  }),
+  workspace: one(workspaces, {
+    fields: [issueComments.workspaceId],
+    references: [workspaces.id],
+  }),
   actor: one(users, {
     fields: [issueComments.actorId],
     references: [users.id],
+    relationName: "commentActor",
+  }),
+  parent: one(issueComments, {
+    fields: [issueComments.parentId],
+    references: [issueComments.id],
+    relationName: "commentParent",
+  }),
+  children: many(issueComments, { relationName: "commentParent" }),
+  createdBy: one(users, {
+    fields: [issueComments.createdById],
+    references: [users.id],
+    relationName: "commentCreatedBy",
+  }),
+  updatedBy: one(users, {
+    fields: [issueComments.updatedById],
+    references: [users.id],
+    relationName: "commentUpdatedBy",
   }),
   reactions: many(commentReactions),
 }));

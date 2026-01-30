@@ -22,6 +22,9 @@ export * from "./page";
 // Views
 export * from "./view";
 
+// Intake (Inbox)
+export * from "./intake";
+
 // Notifications
 export * from "./notification";
 

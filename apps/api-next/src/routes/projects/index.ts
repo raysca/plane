@@ -16,7 +16,7 @@ import {
 import { workspaces, workspaceMembers, favorites, recentVisits } from "../../db/schema/workspace";
 import { cycles, cycleIssues, cycleFavorites, cycleUserProperties } from "../../db/schema/cycle";
 import { modules, moduleIssues, moduleMembers, moduleFavorites, moduleLinks, moduleUserProperties } from "../../db/schema/module";
-import { issues, issueAssignees, issueDescriptionVersions } from "../../db/schema/issue";
+import { issues, issueAssignees, issueDescriptionVersions, issueComments, commentReactions } from "../../db/schema/issue";
 import { views, viewFavorites } from "../../db/schema/view";
 import { authMiddleware, ROLES } from "../../middleware/auth";
 import {
@@ -141,12 +141,35 @@ const updateLabelSchema = z.object({
 });
 
 const createEstimateSchema = z.object({
-  name: z.string().min(1).max(100),
+  // Django bulk format: { estimate: { name, type, last_used }, estimate_points: [...] }
+  estimate: z.object({
+    name: z.string().max(255).optional(),
+    type: z.enum(["categories", "points", "time"]).optional(),
+    last_used: z.boolean().optional(),
+  }).optional(),
+  estimate_points: z.array(z.object({
+    key: z.number().int().optional(),
+    value: z.string().max(255).optional().default(""),
+    description: z.string().optional().default(""),
+  })).optional(),
+  // Also support simple format
+  name: z.string().min(1).max(100).optional(),
   description: z.string().optional(),
   type: z.enum(["categories", "points", "time"]).optional(),
 });
 
 const updateEstimateSchema = z.object({
+  // Django bulk format
+  estimate: z.object({
+    name: z.string().max(255).optional(),
+    type: z.enum(["categories", "points", "time"]).optional(),
+  }).optional(),
+  estimate_points: z.array(z.object({
+    id: z.string(),
+    key: z.number().int().optional(),
+    value: z.string().max(255).optional(),
+  })).optional(),
+  // Simple format
   name: z.string().min(1).max(100).optional(),
   description: z.string().optional().nullable(),
   type: z.enum(["categories", "points", "time"]).optional(),
@@ -163,6 +186,15 @@ const updateEstimatePointSchema = z.object({
   value: z.string().min(1).optional(),
   description: z.string().optional().nullable(),
 });
+
+function generateRandomName(length = 10): string {
+  const letters = "abcdefghijklmnopqrstuvwxyz";
+  let result = "";
+  for (let i = 0; i < length; i++) {
+    result += letters.charAt(Math.floor(Math.random() * letters.length));
+  }
+  return result;
+}
 
 // --- Helper formatters ---
 
@@ -1389,7 +1421,7 @@ projectRoutes.get("/:projectId/estimates/", async (c) => {
   );
 });
 
-// POST /:projectId/estimates/ - Create estimate
+// POST /:projectId/estimates/ - Create estimate (supports Django bulk format)
 projectRoutes.post("/:projectId/estimates/", requireProjectAdmin, zValidator("json", createEstimateSchema), async (c) => {
   const project = c.get("project");
   const workspace = c.get("workspace");
@@ -1398,22 +1430,68 @@ projectRoutes.post("/:projectId/estimates/", requireProjectAdmin, zValidator("js
 
   const body = c.req.valid("json");
 
+  // Support both Django bulk format and simple format
+  const estimateData = body.estimate ?? {};
+  const estimateName = estimateData.name ?? body.name ?? generateRandomName();
+  const estimateType = estimateData.type ?? body.type ?? "categories";
+  const lastUsed = estimateData.last_used ?? false;
+
   const result = await db
     .insert(estimates)
     .values({
       projectId: project.id,
       workspaceId: workspace.id,
-      name: body.name,
+      name: estimateName,
       description: body.description,
-      type: body.type ?? "categories",
+      type: estimateType,
       createdById: user.id,
     })
     .returning();
 
-  return c.json(formatEstimate(result[0]!, []), 201);
+  const estimate = result[0]!;
+
+  // Create estimate points if provided (Django bulk format)
+  const pointsData = body.estimate_points ?? [];
+  let createdPoints: (typeof estimatePoints.$inferSelect)[] = [];
+  if (pointsData.length > 0) {
+    createdPoints = await db
+      .insert(estimatePoints)
+      .values(
+        pointsData.map((p) => ({
+          estimateId: estimate.id,
+          key: p.key ?? 0,
+          value: p.value ?? "",
+          description: p.description ?? "",
+        }))
+      )
+      .returning();
+  }
+
+  return c.json(formatEstimate(estimate, createdPoints));
 });
 
-// PATCH /:projectId/estimates/:estimateId/ - Update estimate
+// GET /:projectId/estimates/:estimateId/ - Retrieve single estimate
+projectRoutes.get("/:projectId/estimates/:estimateId/", async (c) => {
+  const project = c.get("project");
+  if (!project) return c.json({ detail: "Not found." }, 404);
+
+  const estimateId = c.req.param("estimateId");
+
+  const estimate = await db.query.estimates.findFirst({
+    where: and(eq(estimates.id, estimateId), eq(estimates.projectId, project.id)),
+  });
+
+  if (!estimate) return c.json({ detail: "Estimate not found." }, 404);
+
+  const points = await db.query.estimatePoints.findMany({
+    where: eq(estimatePoints.estimateId, estimateId),
+    orderBy: [asc(estimatePoints.key)],
+  });
+
+  return c.json(formatEstimate(estimate, points));
+});
+
+// PATCH /:projectId/estimates/:estimateId/ - Update estimate (supports Django bulk format)
 projectRoutes.patch("/:projectId/estimates/:estimateId/", requireProjectAdmin, zValidator("json", updateEstimateSchema), async (c) => {
   const project = c.get("project");
   if (!project) return c.json({ detail: "Not found." }, 404);
@@ -1427,13 +1505,41 @@ projectRoutes.patch("/:projectId/estimates/:estimateId/", requireProjectAdmin, z
   if (!estimate) return c.json({ detail: "Estimate not found." }, 404);
 
   const body = c.req.valid("json");
+
+  // Update estimate metadata (Django format or simple format)
+  const estimateUpdate = body.estimate;
   const updateData: Record<string, unknown> = { updatedAt: new Date() };
 
+  if (estimateUpdate) {
+    if (estimateUpdate.name !== undefined) updateData.name = estimateUpdate.name;
+    if (estimateUpdate.type !== undefined) updateData.type = estimateUpdate.type;
+  }
   if (body.name !== undefined) updateData.name = body.name;
   if (body.description !== undefined) updateData.description = body.description;
   if (body.type !== undefined) updateData.type = body.type;
 
   await db.update(estimates).set(updateData).where(eq(estimates.id, estimateId));
+
+  // Bulk update estimate points if provided (Django format)
+  const pointsData = body.estimate_points ?? [];
+  if (pointsData.length > 0) {
+    const existingPoints = await db.query.estimatePoints.findMany({
+      where: and(
+        eq(estimatePoints.estimateId, estimateId),
+        inArray(estimatePoints.id, pointsData.map((p) => p.id))
+      ),
+    });
+
+    for (const existingPoint of existingPoints) {
+      const pointData = pointsData.find((p) => p.id === existingPoint.id);
+      if (pointData) {
+        const pointUpdate: Record<string, unknown> = { updatedAt: new Date() };
+        if (pointData.value !== undefined) pointUpdate.value = pointData.value;
+        if (pointData.key !== undefined) pointUpdate.key = pointData.key;
+        await db.update(estimatePoints).set(pointUpdate).where(eq(estimatePoints.id, existingPoint.id));
+      }
+    }
+  }
 
   const updated = await db.query.estimates.findFirst({
     where: eq(estimates.id, estimateId),
@@ -1577,6 +1683,122 @@ projectRoutes.delete("/:projectId/estimates/:estimateId/points/:pointId/", requi
   await db.delete(estimatePoints).where(eq(estimatePoints.id, pointId));
 
   return new Response(null, { status: 204 });
+});
+
+// --- Estimate Points sub-routes (Django-compatible /estimate-points/ path) ---
+// The frontend uses /estimate-points/ not /points/
+
+// POST /:projectId/estimates/:estimateId/estimate-points/ - Create estimate point
+projectRoutes.post("/:projectId/estimates/:estimateId/estimate-points/", requireProjectAdmin, zValidator("json", createEstimatePointSchema), async (c) => {
+  const project = c.get("project");
+  if (!project) return c.json({ detail: "Not found." }, 404);
+
+  const estimateId = c.req.param("estimateId");
+
+  const estimate = await db.query.estimates.findFirst({
+    where: and(eq(estimates.id, estimateId), eq(estimates.projectId, project.id)),
+  });
+
+  if (!estimate) return c.json({ detail: "Estimate not found." }, 404);
+
+  const body = c.req.valid("json");
+
+  if (!body.key && body.key !== 0) {
+    return c.json({ error: "Key and value are required" }, 400);
+  }
+
+  const result = await db
+    .insert(estimatePoints)
+    .values({
+      estimateId,
+      key: body.key,
+      value: body.value,
+      description: body.description,
+    })
+    .returning();
+
+  return c.json(formatEstimatePoint(result[0]!));
+});
+
+// PATCH /:projectId/estimates/:estimateId/estimate-points/:pointId/ - Update estimate point
+projectRoutes.patch("/:projectId/estimates/:estimateId/estimate-points/:pointId/", requireProjectAdmin, zValidator("json", updateEstimatePointSchema), async (c) => {
+  const project = c.get("project");
+  if (!project) return c.json({ detail: "Not found." }, 404);
+
+  const estimateId = c.req.param("estimateId");
+  const pointId = c.req.param("pointId");
+
+  const point = await db.query.estimatePoints.findFirst({
+    where: and(
+      eq(estimatePoints.id, pointId),
+      eq(estimatePoints.estimateId, estimateId)
+    ),
+  });
+
+  if (!point) return c.json({ detail: "Estimate point not found." }, 404);
+
+  const body = c.req.valid("json");
+  const updateData: Record<string, unknown> = { updatedAt: new Date() };
+
+  if (body.key !== undefined) updateData.key = body.key;
+  if (body.value !== undefined) updateData.value = body.value;
+  if (body.description !== undefined) updateData.description = body.description;
+
+  await db.update(estimatePoints).set(updateData).where(eq(estimatePoints.id, pointId));
+
+  const updated = await db.query.estimatePoints.findFirst({
+    where: eq(estimatePoints.id, pointId),
+  });
+
+  return c.json(formatEstimatePoint(updated!));
+});
+
+// DELETE /:projectId/estimates/:estimateId/estimate-points/:pointId/ - Delete estimate point
+projectRoutes.delete("/:projectId/estimates/:estimateId/estimate-points/:pointId/", requireProjectAdmin, async (c) => {
+  const project = c.get("project");
+  if (!project) return c.json({ detail: "Not found." }, 404);
+
+  const estimateId = c.req.param("estimateId");
+  const pointId = c.req.param("pointId");
+
+  const allPoints = await db.query.estimatePoints.findMany({
+    where: eq(estimatePoints.estimateId, estimateId),
+    orderBy: [asc(estimatePoints.key)],
+  });
+
+  const oldPoint = allPoints.find((p) => p.id === pointId);
+  if (!oldPoint) return c.json({ detail: "Estimate point not found." }, 404);
+
+  // Rekey remaining points (Django behavior: decrement keys above deleted point)
+  const updatedPoints: typeof allPoints = [];
+  for (const ep of allPoints) {
+    if (ep.id !== pointId && ep.key > oldPoint.key) {
+      await db.update(estimatePoints).set({ key: ep.key - 1 }).where(eq(estimatePoints.id, ep.id));
+      updatedPoints.push({ ...ep, key: ep.key - 1 });
+    } else if (ep.id !== pointId) {
+      updatedPoints.push(ep);
+    }
+  }
+
+  await db.delete(estimatePoints).where(eq(estimatePoints.id, pointId));
+
+  return c.json(updatedPoints.map(formatEstimatePoint));
+});
+
+// GET /:projectId/project-estimates/ - Get estimate points for project's current estimate
+projectRoutes.get("/:projectId/project-estimates/", async (c) => {
+  const project = c.get("project");
+  if (!project) return c.json({ detail: "Not found." }, 404);
+
+  if (project.estimateId) {
+    const points = await db.query.estimatePoints.findMany({
+      where: eq(estimatePoints.estimateId, project.estimateId),
+      orderBy: [asc(estimatePoints.key)],
+    });
+    return c.json(points.map(formatEstimatePoint));
+  }
+
+  return c.json([]);
 });
 
 // =====================================================
@@ -4130,5 +4352,144 @@ projectRoutes.get("/:projectId/work-items/:issueId/description-versions/:version
     updated_by: version.updatedById ?? null,
   });
 });
+
+// =====================================================
+// Comment Reactions (project-level)
+// Django URL: /workspaces/:slug/projects/:projectId/comments/:commentId/reactions/
+// =====================================================
+
+const createReactionSchema = z.object({
+  reaction: z.string().min(1).max(50),
+});
+
+// GET /:projectId/comments/:commentId/reactions/ - List comment reactions
+projectRoutes.get("/:projectId/comments/:commentId/reactions/", projectMiddleware, async (c) => {
+  const commentId = c.req.param("commentId");
+
+  const reactions = await db
+    .select()
+    .from(commentReactions)
+    .where(eq(commentReactions.commentId, commentId))
+    .orderBy(desc(commentReactions.createdAt));
+
+  // Fetch actor details
+  const actorIds = [...new Set(reactions.map((r) => r.actorId))];
+  const actorRows =
+    actorIds.length > 0
+      ? await db
+          .select({
+            id: users.id,
+            displayName: users.displayName,
+            firstName: users.name,
+            avatar: users.avatar,
+          })
+          .from(users)
+          .where(inArray(users.id, actorIds))
+      : [];
+
+  const actorMap = new Map(
+    actorRows.map((a) => [
+      a.id,
+      {
+        id: a.id,
+        display_name: a.displayName ?? a.firstName ?? "",
+        first_name: a.firstName ?? "",
+        last_name: "",
+        avatar_url: a.avatar ?? null,
+        is_bot: false,
+      },
+    ])
+  );
+
+  return c.json(
+    reactions.map((r) => ({
+      id: r.id,
+      comment: r.commentId,
+      actor: r.actorId,
+      reaction: r.reaction,
+      created_at: r.createdAt?.toISOString() ?? null,
+      actor_detail: actorMap.get(r.actorId) ?? null,
+    }))
+  );
+});
+
+// POST /:projectId/comments/:commentId/reactions/ - Add comment reaction
+projectRoutes.post(
+  "/:projectId/comments/:commentId/reactions/",
+  projectMiddleware,
+  requireProjectMember,
+  zValidator("json", createReactionSchema),
+  async (c) => {
+    const user = c.get("user");
+    if (!user) return c.json({ detail: "Not found." }, 404);
+
+    const commentId = c.req.param("commentId");
+    const { reaction } = c.req.valid("json");
+
+    // Check if reaction already exists
+    const existing = await db.query.commentReactions.findFirst({
+      where: and(
+        eq(commentReactions.commentId, commentId),
+        eq(commentReactions.actorId, user.id),
+        eq(commentReactions.reaction, reaction)
+      ),
+    });
+
+    if (existing) {
+      return c.json({
+        id: existing.id,
+        comment: existing.commentId,
+        actor: existing.actorId,
+        reaction: existing.reaction,
+        created_at: existing.createdAt?.toISOString() ?? null,
+      });
+    }
+
+    const result = await db
+      .insert(commentReactions)
+      .values({ commentId, actorId: user.id, reaction })
+      .returning();
+
+    const r = result[0]!;
+    return c.json(
+      {
+        id: r.id,
+        comment: r.commentId,
+        actor: r.actorId,
+        reaction: r.reaction,
+        created_at: r.createdAt?.toISOString() ?? null,
+      },
+      201
+    );
+  }
+);
+
+// DELETE /:projectId/comments/:commentId/reactions/:reactionCode/ - Remove comment reaction by code
+projectRoutes.delete(
+  "/:projectId/comments/:commentId/reactions/:reactionCode/",
+  projectMiddleware,
+  requireProjectMember,
+  async (c) => {
+    const user = c.get("user");
+    if (!user) return c.json({ detail: "Not found." }, 404);
+
+    const commentId = c.req.param("commentId");
+    const reactionCode = c.req.param("reactionCode");
+
+    const reaction = await db.query.commentReactions.findFirst({
+      where: and(
+        eq(commentReactions.commentId, commentId),
+        eq(commentReactions.reaction, reactionCode),
+        eq(commentReactions.actorId, user.id)
+      ),
+    });
+
+    if (!reaction) return c.json({ detail: "Reaction not found." }, 404);
+
+    await db.delete(commentReactions).where(eq(commentReactions.id, reaction.id));
+
+    return new Response(null, { status: 204 });
+  }
+);
 
 export { projectRoutes };
