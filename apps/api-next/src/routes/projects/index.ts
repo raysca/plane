@@ -1975,6 +1975,102 @@ projectRoutes.get("/:projectId/cycles/:cycleId/", async (c) => {
   return c.json(formatCycle(cycle, stats, favSet.has(cycleId), assigneeMap.get(cycleId) || [], { sub_issues: subIssues }));
 });
 
+// GET /:projectId/cycles/:cycleId/progress/ - Cycle progress stats
+projectRoutes.get("/:projectId/cycles/:cycleId/progress/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  if (!project || !workspace) return c.json({ detail: "Not found." }, 404);
+
+  const cycleId = c.req.param("cycleId");
+
+  const cycle = await db.query.cycles.findFirst({
+    where: and(eq(cycles.id, cycleId), eq(cycles.projectId, project.id)),
+  });
+  if (!cycle) return c.json({ error: "Cycle not found" }, 404);
+
+  // If cycle has a progress snapshot (transferred issues), use it
+  const snapshot = cycle.progressSnapshot as Record<string, number> | null;
+  let backlogIssues: number;
+  let unstartedIssues: number;
+  let startedIssues: number;
+  let cancelledIssues: number;
+  let completedIssues: number;
+  let totalIssues: number;
+
+  if (snapshot && Object.keys(snapshot).length > 0) {
+    backlogIssues = snapshot.backlog_issues ?? 0;
+    unstartedIssues = snapshot.unstarted_issues ?? 0;
+    startedIssues = snapshot.started_issues ?? 0;
+    cancelledIssues = snapshot.cancelled_issues ?? 0;
+    completedIssues = snapshot.completed_issues ?? 0;
+    totalIssues = snapshot.total_issues ?? 0;
+  } else {
+    // Compute issue counts by state group from live data
+    const statsMap = await getCycleIssueStats([cycleId]);
+    const stats = statsMap.get(cycleId) || { total: 0, completed: 0, cancelled: 0, started: 0, unstarted: 0, backlog: 0 };
+    backlogIssues = stats.backlog;
+    unstartedIssues = stats.unstarted;
+    startedIssues = stats.started;
+    cancelledIssues = stats.cancelled;
+    completedIssues = stats.completed;
+    totalIssues = stats.total;
+  }
+
+  // Compute estimate point aggregates
+  // Join cycle_issues → issues → states, and sum estimate_point values by state group
+  const estimateRows = await db
+    .select({
+      stateGroup: states.group,
+      totalEstimate: sql<number>`COALESCE(SUM(${issues.estimatePoint}), 0)`,
+    })
+    .from(cycleIssues)
+    .innerJoin(issues, eq(cycleIssues.issueId, issues.id))
+    .innerJoin(states, eq(issues.stateId, states.id))
+    .where(
+      and(
+        eq(cycleIssues.cycleId, cycleId),
+        isNull(issues.archivedAt),
+        isNull(issues.deletedAt),
+        isNotNull(issues.estimatePoint)
+      )
+    )
+    .groupBy(states.group);
+
+  let backlogEstimate = 0;
+  let unstartedEstimate = 0;
+  let startedEstimate = 0;
+  let cancelledEstimate = 0;
+  let completedEstimate = 0;
+  let totalEstimate = 0;
+
+  for (const row of estimateRows) {
+    const val = Number(row.totalEstimate) || 0;
+    totalEstimate += val;
+    switch (row.stateGroup) {
+      case "backlog": backlogEstimate = val; break;
+      case "unstarted": unstartedEstimate = val; break;
+      case "started": startedEstimate = val; break;
+      case "cancelled": cancelledEstimate = val; break;
+      case "completed": completedEstimate = val; break;
+    }
+  }
+
+  return c.json({
+    backlog_estimate_points: backlogEstimate,
+    unstarted_estimate_points: unstartedEstimate,
+    started_estimate_points: startedEstimate,
+    cancelled_estimate_points: cancelledEstimate,
+    completed_estimate_points: completedEstimate,
+    total_estimate_points: totalEstimate,
+    backlog_issues: backlogIssues,
+    total_issues: totalIssues,
+    completed_issues: completedIssues,
+    cancelled_issues: cancelledIssues,
+    started_issues: startedIssues,
+    unstarted_issues: unstartedIssues,
+  });
+});
+
 // PATCH /:projectId/cycles/:cycleId/ - Update cycle
 const updateCycleSchema = z.object({
   name: z.string().min(1).optional(),

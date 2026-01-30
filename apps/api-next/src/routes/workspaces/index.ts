@@ -26,13 +26,13 @@ import { generateSlug, isValidSlug } from "../../lib/utils";
 import { seedWorkspace } from "../../lib/workspace-seeder";
 import { userProfiles } from "../../db/schema/user";
 import { notifications } from "../../db/schema/notification";
-import { issues, issueAssignees, issueActivities, issueSubscribers } from "../../db/schema/issue";
+import { issues, issueAssignees, issueActivities, issueSubscribers, issueLabels, issueLinks, issueAttachments } from "../../db/schema/issue";
 import { projects, projectMembers, states, labels } from "../../db/schema/project";
 import { pages } from "../../db/schema/page";
 import { cycles, cycleIssues, cycleFavorites } from "../../db/schema/cycle";
 import { modules, moduleIssues, moduleMembers, moduleFavorites, moduleLinks } from "../../db/schema/module";
 import { views, viewFavorites } from "../../db/schema/view";
-import { sql, not, like, isNull, count, lt, gt, max } from "drizzle-orm";
+import { sql, not, like, isNull, count, count as countFn, lt, gt, gte, lte, max, or, isNotNull } from "drizzle-orm";
 import homePreferenceRoutes from "./home-preference";
 import userPropertiesRoutes from "./user-properties";
 
@@ -3434,6 +3434,626 @@ workspaceRoutes.get("/:slug/user-stats/:userId/", async (c) => {
     subscribed_issues: subscribedResult?.count ?? 0,
     present_cycles: presentCyclesRaw,
     upcoming_cycles: upcomingCyclesRaw,
+  });
+});
+
+// ===========================
+// Section: User Profile (project segregation)
+// ===========================
+
+workspaceRoutes.get("/:slug/user-profile/:userId/", async (c) => {
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const targetUserId = c.req.param("userId");
+
+  // Fetch the target user
+  const userData = await db.query.users.findFirst({
+    where: eq(users.id, targetUserId),
+  });
+  if (!userData) return c.json({ detail: "User not found." }, 404);
+
+  // Fetch user profile for timezone
+  const profile = await db.query.userProfiles.findFirst({
+    where: eq(userProfiles.userId, targetUserId),
+  });
+
+  // Check requesting user's workspace membership role
+  const membership = c.get("workspaceMembership");
+  let projectData: any[] = [];
+
+  if (membership && membership.role >= 15) {
+    // Get projects the requesting user is an active member of (non-archived)
+    const memberProjects = await db
+      .select()
+      .from(projects)
+      .innerJoin(projectMembers, eq(projects.id, projectMembers.projectId))
+      .where(
+        and(
+          eq(projects.workspaceId, workspace.id),
+          eq(projectMembers.memberId, user.id),
+          eq(projectMembers.isActive, true),
+          isNull(projects.archivedAt)
+        )
+      );
+
+    if (memberProjects.length > 0) {
+      const projectIds = memberProjects.map((p) => p.projects.id);
+
+      // For each project, compute issue stats for the target user
+      // Get all issues in these projects
+      const allProjectIssues = await db
+        .select({
+          id: issues.id,
+          projectId: issues.projectId,
+          createdById: issues.createdById,
+          completedAt: issues.completedAt,
+          stateId: issues.stateId,
+        })
+        .from(issues)
+        .where(
+          and(
+            inArray(issues.projectId, projectIds),
+            isNull(issues.archivedAt),
+            isNull(issues.deletedAt)
+          )
+        );
+
+      // Get all assignees for these issues
+      const issueIds = allProjectIssues.map((i) => i.id);
+      const allAssigneeRows = issueIds.length > 0
+        ? await db.select().from(issueAssignees).where(inArray(issueAssignees.issueId, issueIds))
+        : [];
+
+      // Build assignee map: issueId -> Set of assigneeIds
+      const assigneeMap = new Map<string, Set<string>>();
+      for (const a of allAssigneeRows) {
+        if (!assigneeMap.has(a.issueId)) assigneeMap.set(a.issueId, new Set());
+        assigneeMap.get(a.issueId)!.add(a.assigneeId);
+      }
+
+      // Get all state groups
+      const allStates = await db
+        .select({ id: states.id, group: states.group })
+        .from(states)
+        .where(inArray(states.projectId, projectIds));
+
+      const stateGroupMap = new Map<string, string>();
+      for (const s of allStates) {
+        stateGroupMap.set(s.id, s.group);
+      }
+
+      // Compute per-project stats
+      const statsMap = new Map<string, { created: number; assigned: number; completed: number; pending: number }>();
+      for (const pid of projectIds) {
+        statsMap.set(pid, { created: 0, assigned: 0, completed: 0, pending: 0 });
+      }
+
+      for (const issue of allProjectIssues) {
+        const stats = statsMap.get(issue.projectId);
+        if (!stats) continue;
+
+        // Created by target user
+        if (issue.createdById === targetUserId) {
+          stats.created++;
+        }
+
+        // Assigned to target user
+        const assignees = assigneeMap.get(issue.id);
+        if (assignees?.has(targetUserId)) {
+          stats.assigned++;
+
+          // Completed (assigned to target user and completed)
+          if (issue.completedAt) {
+            stats.completed++;
+          }
+
+          // Pending (assigned to target user with state in backlog/unstarted/started)
+          const stateGroup = issue.stateId ? stateGroupMap.get(issue.stateId) : null;
+          if (stateGroup && ["backlog", "unstarted", "started"].includes(stateGroup)) {
+            stats.pending++;
+          }
+        }
+      }
+
+      projectData = projectIds.map((pid) => {
+        const proj = memberProjects.find((p) => p.projects.id === pid)?.projects;
+        const stats = statsMap.get(pid)!;
+        return {
+          id: pid,
+          logo_props: proj?.logoProps ?? null,
+          created_issues: stats.created,
+          assigned_issues: stats.assigned,
+          completed_issues: stats.completed,
+          pending_issues: stats.pending,
+        };
+      });
+    }
+  }
+
+  return c.json({
+    project_data: projectData,
+    user_data: {
+      email: userData.email,
+      first_name: userData.firstName ?? "",
+      last_name: userData.lastName ?? "",
+      avatar_url: userData.avatar ?? "",
+      cover_image_url: userData.coverImage ?? "",
+      date_joined: userData.createdAt?.toISOString() ?? null,
+      user_timezone: profile?.timezone ?? "UTC",
+      display_name: userData.displayName ?? userData.name ?? "",
+    },
+  });
+});
+
+// ===========================
+// Section: User Issues (profile issues)
+// ===========================
+
+// Helper: format an issue for the profile issues response (same as issues route)
+interface IssueExtra {
+  assigneeIds: string[];
+  labelIds: string[];
+  moduleIds: string[];
+  cycleId: string | null;
+  subIssuesCount: number;
+  attachmentCount: number;
+  linkCount: number;
+  stateGroup: string | null;
+}
+
+function formatIssueForProfile(
+  issue: typeof issues.$inferSelect,
+  extra: IssueExtra
+) {
+  return {
+    id: issue.id,
+    project_id: issue.projectId,
+    workspace_id: issue.workspaceId,
+    parent_id: issue.parentId ?? null,
+    state_id: issue.stateId ?? null,
+    state__group: extra.stateGroup ?? "backlog",
+    name: issue.name,
+    description_html: issue.descriptionHtml ?? "",
+    description_stripped: issue.descriptionStripped ?? "",
+    priority: issue.priority ?? 0,
+    sort_order: issue.sortOrder ?? 65535,
+    start_date: issue.startDate?.toISOString()?.split("T")[0] ?? null,
+    target_date: issue.targetDate?.toISOString()?.split("T")[0] ?? null,
+    completed_at: issue.completedAt?.toISOString() ?? null,
+    archived_at: issue.archivedAt?.toISOString() ?? null,
+    sequence_id: issue.sequenceId ?? null,
+    estimate_point: issue.estimatePoint ?? null,
+    is_epic: issue.isEpic ?? false,
+    assignee_ids: extra.assigneeIds,
+    label_ids: extra.labelIds,
+    module_ids: extra.moduleIds,
+    cycle_id: extra.cycleId,
+    sub_issues_count: extra.subIssuesCount,
+    attachment_count: extra.attachmentCount,
+    link_count: extra.linkCount,
+    created_by: issue.createdById ?? null,
+    updated_by: issue.updatedById ?? null,
+    created_at: issue.createdAt?.toISOString() ?? null,
+    updated_at: issue.updatedAt?.toISOString() ?? null,
+  };
+}
+
+workspaceRoutes.get("/:slug/user-issues/:userId/", async (c) => {
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const targetUserId = c.req.param("userId");
+  const query = c.req.query();
+
+  // Pagination
+  const cursorParam = query.cursor || `${query.per_page || "100"}:0:0`;
+  const orderBy = query.order_by || "-created_at";
+  const groupBy = query.group_by || null;
+  const subGroupBy = query.sub_group_by || null;
+  const subIssue = query.sub_issue !== "false";
+
+  const cursorParts = cursorParam.split(":");
+  const perPage = Math.min(parseInt(cursorParts[0] || "100") || 100, 1000);
+  const pageNumber = parseInt(cursorParts[1] || "0") || 0;
+  const offset = pageNumber * perPage;
+
+  // Parse filters
+  let filters: Record<string, any> = {};
+  try {
+    if (query.filters) filters = JSON.parse(query.filters);
+  } catch {}
+
+  // Get projects the requesting user is an active member of
+  const memberProjects = await db
+    .select({ projectId: projectMembers.projectId })
+    .from(projectMembers)
+    .innerJoin(projects, eq(projectMembers.projectId, projects.id))
+    .where(
+      and(
+        eq(projectMembers.memberId, user.id),
+        eq(projectMembers.isActive, true),
+        eq(projects.workspaceId, workspace.id),
+        isNull(projects.archivedAt)
+      )
+    );
+
+  const memberProjectIds = memberProjects.map((p) => p.projectId);
+
+  if (memberProjectIds.length === 0) {
+    return c.json({
+      grouped_by: groupBy,
+      sub_grouped_by: subGroupBy ?? null,
+      total_count: 0,
+      next_cursor: `${perPage}:1:0`,
+      prev_cursor: `${perPage}:0:0`,
+      next_page_results: false,
+      prev_page_results: false,
+      count: 0,
+      total_pages: 0,
+      extra_stats: null,
+      results: groupBy ? {} : [],
+    });
+  }
+
+  // Step 1: Find issue IDs where target user is assigned, created, or subscribed
+  const [assignedIssueIds, createdIssueIds, subscribedIssueIds] = await Promise.all([
+    db.select({ issueId: issueAssignees.issueId }).from(issueAssignees)
+      .innerJoin(issues, eq(issueAssignees.issueId, issues.id))
+      .where(
+        and(
+          eq(issueAssignees.assigneeId, targetUserId),
+          eq(issues.workspaceId, workspace.id),
+          isNull(issues.deletedAt)
+        )
+      ),
+    db.select({ id: issues.id }).from(issues)
+      .where(
+        and(
+          eq(issues.createdById, targetUserId),
+          eq(issues.workspaceId, workspace.id),
+          isNull(issues.deletedAt)
+        )
+      ),
+    db.select({ issueId: issueSubscribers.issueId }).from(issueSubscribers)
+      .where(
+        and(
+          eq(issueSubscribers.subscriberId, targetUserId),
+          eq(issueSubscribers.workspaceId, workspace.id)
+        )
+      ),
+  ]);
+
+  const relevantIssueIdSet = new Set<string>();
+  for (const r of assignedIssueIds) relevantIssueIdSet.add(r.issueId);
+  for (const r of createdIssueIds) relevantIssueIdSet.add(r.id);
+  for (const r of subscribedIssueIds) relevantIssueIdSet.add(r.issueId);
+
+  const relevantIssueIds = [...relevantIssueIdSet];
+
+  if (relevantIssueIds.length === 0) {
+    return c.json({
+      grouped_by: groupBy,
+      sub_grouped_by: subGroupBy ?? null,
+      total_count: 0,
+      next_cursor: `${perPage}:1:0`,
+      prev_cursor: `${perPage}:0:0`,
+      next_page_results: false,
+      prev_page_results: false,
+      count: 0,
+      total_pages: 0,
+      extra_stats: null,
+      results: groupBy ? {} : [],
+    });
+  }
+
+  // Step 2: Build conditions for filtering
+  const conditions: ReturnType<typeof eq>[] = [
+    inArray(issues.id, relevantIssueIds),
+    inArray(issues.projectId, memberProjectIds),
+    isNull(issues.deletedAt),
+    isNull(issues.archivedAt),
+  ];
+
+  if (!subIssue) {
+    conditions.push(isNull(issues.parentId));
+  }
+
+  // Legacy query param filters
+  if (query.state) {
+    conditions.push(inArray(issues.stateId, query.state.split(",")));
+  }
+  if (query.priority) {
+    conditions.push(inArray(issues.priority, query.priority.split(",").map(Number)));
+  }
+  if (query.created_by) {
+    conditions.push(inArray(issues.createdById, query.created_by.split(",")));
+  }
+  if (query.start_date) {
+    conditions.push(gte(issues.startDate, new Date(query.start_date)));
+  }
+  if (query.target_date) {
+    conditions.push(lte(issues.targetDate, new Date(query.target_date)));
+  }
+  if (query.search) {
+    conditions.push(like(issues.name, `%${query.search}%`));
+  }
+
+  // JSON filters
+  if (filters.state) {
+    conditions.push(inArray(issues.stateId, filters.state));
+  }
+  if (filters.priority) {
+    conditions.push(inArray(issues.priority, filters.priority.map(Number)));
+  }
+
+  // Sort
+  const isDescOrder = orderBy.startsWith("-");
+  const sortField = isDescOrder ? orderBy.slice(1) : orderBy;
+  const sortFn = isDescOrder ? desc : asc;
+
+  let sortColumn: ReturnType<typeof asc>;
+  switch (sortField) {
+    case "created_at": sortColumn = sortFn(issues.createdAt); break;
+    case "updated_at": sortColumn = sortFn(issues.updatedAt); break;
+    case "priority": sortColumn = sortFn(issues.priority); break;
+    case "sort_order": sortColumn = sortFn(issues.sortOrder); break;
+    case "sequence_id": sortColumn = sortFn(issues.sequenceId); break;
+    case "name": sortColumn = sortFn(issues.name); break;
+    case "start_date": sortColumn = sortFn(issues.startDate); break;
+    case "target_date": sortColumn = sortFn(issues.targetDate); break;
+    default: sortColumn = sortFn(issues.createdAt);
+  }
+
+  // Fetch matching issues
+  const allIssues = await db
+    .select()
+    .from(issues)
+    .where(and(...conditions))
+    .orderBy(sortColumn);
+
+  // Post-filter by assignees/labels (junction tables)
+  let filteredIssues = allIssues;
+  if (query.assignees || filters.assignees) {
+    const filterAssigneeIds = (query.assignees || "").split(",").filter(Boolean);
+    if (filters.assignees) filterAssigneeIds.push(...filters.assignees);
+    if (filterAssigneeIds.length > 0) {
+      const matchingIssueIds = await db
+        .select({ issueId: issueAssignees.issueId })
+        .from(issueAssignees)
+        .where(
+          and(
+            inArray(issueAssignees.issueId, allIssues.map((i) => i.id)),
+            inArray(issueAssignees.assigneeId, filterAssigneeIds)
+          )
+        );
+      const matchSet = new Set(matchingIssueIds.map((m) => m.issueId));
+      filteredIssues = filteredIssues.filter((i) => matchSet.has(i.id));
+    }
+  }
+  if (query.labels || filters.labels) {
+    const filterLabelIds = (query.labels || "").split(",").filter(Boolean);
+    if (filters.labels) filterLabelIds.push(...filters.labels);
+    if (filterLabelIds.length > 0) {
+      const matchingIssueIds = await db
+        .select({ issueId: issueLabels.issueId })
+        .from(issueLabels)
+        .where(
+          and(
+            inArray(issueLabels.issueId, filteredIssues.map((i) => i.id)),
+            inArray(issueLabels.labelId, filterLabelIds)
+          )
+        );
+      const matchSet = new Set(matchingIssueIds.map((m) => m.issueId));
+      filteredIssues = filteredIssues.filter((i) => matchSet.has(i.id));
+    }
+  }
+
+  const totalCount = filteredIssues.length;
+  const allIds = filteredIssues.map((i) => i.id);
+
+  // Batch fetch extra data
+  const [allAssigneeRows, allLabelRows, allModuleRows, allCycleRows, allStateRows, subIssueCounts, attachmentCounts, linkCounts] = await Promise.all([
+    allIds.length > 0
+      ? db.select().from(issueAssignees).where(inArray(issueAssignees.issueId, allIds))
+      : [],
+    allIds.length > 0
+      ? db.select().from(issueLabels).where(inArray(issueLabels.issueId, allIds))
+      : [],
+    allIds.length > 0
+      ? db.select().from(moduleIssues).where(inArray(moduleIssues.issueId, allIds))
+      : [],
+    allIds.length > 0
+      ? db.select().from(cycleIssues).where(inArray(cycleIssues.issueId, allIds))
+      : [],
+    // All state groups across workspace projects
+    db.select({ id: states.id, group: states.group }).from(states)
+      .where(eq(states.workspaceId, workspace.id)),
+    allIds.length > 0
+      ? db.select({ parentId: issues.parentId, count: countFn() }).from(issues)
+          .where(and(inArray(issues.parentId, allIds), isNull(issues.deletedAt)))
+          .groupBy(issues.parentId)
+      : [],
+    allIds.length > 0
+      ? db.select({ issueId: issueAttachments.issueId, count: countFn() }).from(issueAttachments)
+          .where(inArray(issueAttachments.issueId, allIds))
+          .groupBy(issueAttachments.issueId)
+      : [],
+    allIds.length > 0
+      ? db.select({ issueId: issueLinks.issueId, count: countFn() }).from(issueLinks)
+          .where(inArray(issueLinks.issueId, allIds))
+          .groupBy(issueLinks.issueId)
+      : [],
+  ]);
+
+  // Build lookup maps
+  const assigneeMap = new Map<string, string[]>();
+  for (const a of allAssigneeRows) {
+    const arr = assigneeMap.get(a.issueId) ?? [];
+    arr.push(a.assigneeId);
+    assigneeMap.set(a.issueId, arr);
+  }
+
+  const labelMap = new Map<string, string[]>();
+  for (const l of allLabelRows) {
+    const arr = labelMap.get(l.issueId) ?? [];
+    arr.push(l.labelId);
+    labelMap.set(l.issueId, arr);
+  }
+
+  const mModuleMap = new Map<string, string[]>();
+  for (const m of allModuleRows) {
+    const arr = mModuleMap.get(m.issueId) ?? [];
+    arr.push(m.moduleId);
+    mModuleMap.set(m.issueId, arr);
+  }
+
+  const cycleMap = new Map<string, string>();
+  for (const cy of allCycleRows) {
+    cycleMap.set(cy.issueId, cy.cycleId);
+  }
+
+  const stateGroupMap = new Map<string, string>();
+  for (const s of allStateRows) {
+    stateGroupMap.set(s.id, s.group);
+  }
+
+  const subIssueCountMap = new Map<string, number>();
+  for (const s of subIssueCounts) {
+    if (s.parentId) subIssueCountMap.set(s.parentId, s.count);
+  }
+
+  const attachmentCountMap = new Map<string, number>();
+  for (const a of attachmentCounts) {
+    attachmentCountMap.set(a.issueId, a.count);
+  }
+
+  const linkCountMap = new Map<string, number>();
+  for (const l of linkCounts) {
+    linkCountMap.set(l.issueId, l.count);
+  }
+
+  // Format all issues
+  const formattedIssues = filteredIssues.map((i) =>
+    formatIssueForProfile(i, {
+      assigneeIds: assigneeMap.get(i.id) ?? [],
+      labelIds: labelMap.get(i.id) ?? [],
+      moduleIds: mModuleMap.get(i.id) ?? [],
+      cycleId: cycleMap.get(i.id) ?? null,
+      subIssuesCount: subIssueCountMap.get(i.id) ?? 0,
+      attachmentCount: attachmentCountMap.get(i.id) ?? 0,
+      linkCount: linkCountMap.get(i.id) ?? 0,
+      stateGroup: i.stateId ? stateGroupMap.get(i.stateId) ?? null : null,
+    })
+  );
+
+  // Pagination
+  const totalPages = Math.ceil(totalCount / perPage);
+  const nextPageExists = pageNumber + 1 < totalPages;
+  const prevPageExists = pageNumber > 0;
+  const nextCursor = `${perPage}:${pageNumber + 1}:0`;
+  const prevCursor = `${perPage}:${pageNumber > 0 ? pageNumber - 1 : 0}:0`;
+
+  // Grouping helper
+  function getGroupKey(issue: ReturnType<typeof formatIssueForProfile>, field: string): string[] {
+    switch (field) {
+      case "state_id": return [issue.state_id ?? "None"];
+      case "state__group": return [issue.state__group ?? "backlog"];
+      case "priority": return [String(issue.priority)];
+      case "created_by": return [issue.created_by ?? "None"];
+      case "assignees__id": return issue.assignee_ids.length > 0 ? issue.assignee_ids : ["None"];
+      case "labels__id": return issue.label_ids.length > 0 ? issue.label_ids : ["None"];
+      case "issue_module__module_id": return issue.module_ids.length > 0 ? issue.module_ids : ["None"];
+      case "cycle_id": return [issue.cycle_id ?? "None"];
+      case "project_id": return [issue.project_id];
+      case "target_date": return [issue.target_date ?? "None"];
+      case "start_date": return [issue.start_date ?? "None"];
+      default: return ["None"];
+    }
+  }
+
+  if (groupBy) {
+    const grouped: Record<string, { results: ReturnType<typeof formatIssueForProfile>[]; total_results: number }> = {};
+
+    for (const issue of formattedIssues) {
+      const keys = getGroupKey(issue, groupBy);
+      for (const key of keys) {
+        if (!grouped[key]) grouped[key] = { results: [], total_results: 0 };
+        grouped[key].results.push(issue);
+        grouped[key].total_results++;
+      }
+    }
+
+    for (const key of Object.keys(grouped)) {
+      grouped[key].results = grouped[key].results.slice(offset, offset + perPage);
+    }
+
+    if (subGroupBy) {
+      if (groupBy === subGroupBy) {
+        return c.json({ error: "Group by and sub group by cannot have same parameters" }, 400);
+      }
+
+      const nestedGrouped: Record<string, { results: Record<string, { results: ReturnType<typeof formatIssueForProfile>[]; total_results: number }>; total_results: number }> = {};
+
+      for (const [groupKey, groupData] of Object.entries(grouped)) {
+        const subGroups: Record<string, { results: ReturnType<typeof formatIssueForProfile>[]; total_results: number }> = {};
+        for (const issue of groupData.results) {
+          const subKeys = getGroupKey(issue, subGroupBy);
+          for (const subKey of subKeys) {
+            if (!subGroups[subKey]) subGroups[subKey] = { results: [], total_results: 0 };
+            subGroups[subKey].results.push(issue);
+            subGroups[subKey].total_results++;
+          }
+        }
+        nestedGrouped[groupKey] = { results: subGroups, total_results: groupData.total_results };
+      }
+
+      return c.json({
+        grouped_by: groupBy,
+        sub_grouped_by: subGroupBy,
+        next_cursor: nextCursor,
+        prev_cursor: prevCursor,
+        next_page_results: nextPageExists,
+        prev_page_results: prevPageExists,
+        total_count: totalCount,
+        count: formattedIssues.length,
+        total_pages: totalPages,
+        extra_stats: null,
+        results: nestedGrouped,
+      });
+    }
+
+    return c.json({
+      grouped_by: groupBy,
+      next_cursor: nextCursor,
+      prev_cursor: prevCursor,
+      next_page_results: nextPageExists,
+      prev_page_results: prevPageExists,
+      total_count: totalCount,
+      count: formattedIssues.length,
+      total_pages: totalPages,
+      extra_stats: null,
+      results: grouped,
+    });
+  }
+
+  // Ungrouped: apply pagination
+  const paginatedIssues = formattedIssues.slice(offset, offset + perPage);
+
+  return c.json({
+    grouped_by: null,
+    sub_grouped_by: null,
+    total_count: totalCount,
+    next_cursor: nextCursor,
+    prev_cursor: prevCursor,
+    next_page_results: nextPageExists,
+    prev_page_results: prevPageExists,
+    count: paginatedIssues.length,
+    total_pages: totalPages,
+    extra_stats: null,
+    results: paginatedIssues,
   });
 });
 
