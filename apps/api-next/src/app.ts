@@ -13,6 +13,7 @@ import { projectRoutes } from "./routes/projects";
 import { issueRoutes } from "./routes/issues";
 import { instanceRoutes } from "./routes/instances";
 import { workspaceSlugCheckRoutes } from "./routes/workspace-slug-check";
+import { externalRoutes } from "./routes/external";
 
 
 // Types for context variables
@@ -111,6 +112,7 @@ app.route("/api/workspaces/", workspaceRoutes);
 app.route("/api/workspaces/:slug/projects/", projectRoutes);
 app.route("/api/workspaces/:slug/projects/:projectId/issues/", issueRoutes);
 app.route("/api/workspace-slug-check/", workspaceSlugCheckRoutes);
+app.route("/api/unsplash/", externalRoutes);
 
 // 404 handler
 app.notFound((c) => {
