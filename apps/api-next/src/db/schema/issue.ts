@@ -467,3 +467,68 @@ export const issueSubscribersRelations = relations(issueSubscribers, ({ one }) =
     references: [users.id],
   }),
 }));
+
+// Issue Description Versions
+export const issueDescriptionVersions = sqliteTable(
+  "issue_description_versions",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    issueId: text("issue_id")
+      .notNull()
+      .references(() => issues.id, { onDelete: "cascade" }),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    descriptionHtml: text("description_html").default("<p></p>"),
+    descriptionStripped: text("description_stripped"),
+    descriptionJson: text("description_json", { mode: "json" }),
+    lastSavedAt: integer("last_saved_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+    ownedById: text("owned_by_id")
+      .notNull()
+      .references(() => users.id),
+    createdById: text("created_by_id").references(() => users.id),
+    updatedById: text("updated_by_id").references(() => users.id),
+    createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+  },
+  (table) => [
+    index("issue_desc_version_issue_idx").on(table.issueId),
+    index("issue_desc_version_project_idx").on(table.projectId),
+    index("issue_desc_version_workspace_idx").on(table.workspaceId),
+  ]
+);
+
+export const issueDescriptionVersionsRelations = relations(issueDescriptionVersions, ({ one }) => ({
+  issue: one(issues, {
+    fields: [issueDescriptionVersions.issueId],
+    references: [issues.id],
+  }),
+  project: one(projects, {
+    fields: [issueDescriptionVersions.projectId],
+    references: [projects.id],
+  }),
+  workspace: one(workspaces, {
+    fields: [issueDescriptionVersions.workspaceId],
+    references: [workspaces.id],
+  }),
+  ownedBy: one(users, {
+    fields: [issueDescriptionVersions.ownedById],
+    references: [users.id],
+    relationName: "ownedBy",
+  }),
+  createdBy: one(users, {
+    fields: [issueDescriptionVersions.createdById],
+    references: [users.id],
+    relationName: "createdBy",
+  }),
+  updatedBy: one(users, {
+    fields: [issueDescriptionVersions.updatedById],
+    references: [users.id],
+    relationName: "updatedBy",
+  }),
+}));

@@ -16,7 +16,7 @@ import {
 import { workspaces, workspaceMembers, favorites, recentVisits } from "../../db/schema/workspace";
 import { cycles, cycleIssues, cycleFavorites, cycleUserProperties } from "../../db/schema/cycle";
 import { modules, moduleIssues, moduleMembers, moduleFavorites, moduleLinks, moduleUserProperties } from "../../db/schema/module";
-import { issues, issueAssignees } from "../../db/schema/issue";
+import { issues, issueAssignees, issueDescriptionVersions } from "../../db/schema/issue";
 import { views, viewFavorites } from "../../db/schema/view";
 import { authMiddleware, ROLES } from "../../middleware/auth";
 import {
@@ -3980,6 +3980,155 @@ projectRoutes.delete("/:projectId/user-favorite-views/:viewId/", async (c) => {
   await db.delete(viewFavorites).where(eq(viewFavorites.id, fav.id));
 
   return c.body(null, 204);
+});
+
+// ===========================
+// Section: Work Item Description Versions
+// ===========================
+
+// GET /:projectId/work-items/:issueId/description-versions/ - List description versions
+projectRoutes.get("/:projectId/work-items/:issueId/description-versions/", async (c) => {
+  const project = c.get("project");
+  const user = c.get("user");
+  if (!project || !user) return c.json({ detail: "Not found." }, 404);
+
+  const issueId = c.req.param("issueId");
+
+  // Verify issue exists in this project
+  const issue = await db.query.issues.findFirst({
+    where: and(
+      eq(issues.id, issueId),
+      eq(issues.projectId, project.id),
+      isNull(issues.deletedAt)
+    ),
+  });
+  if (!issue) return c.json({ detail: "Issue not found." }, 404);
+
+  // Guest permission check
+  const membership = c.get("projectMembership");
+  if (
+    membership &&
+    membership.role === 5 &&
+    !project.guestViewAllFeatures &&
+    issue.createdById !== user.id
+  ) {
+    return c.json({ error: "You are not allowed to view this issue" }, 403);
+  }
+
+  // Cursor-based pagination
+  const cursor = c.req.query("cursor") || null;
+  const perPage = Math.min(parseInt(c.req.query("per_page") || "10") || 10, 100);
+
+  let offset = 0;
+  if (cursor) {
+    const parts = cursor.split(":");
+    const pageNumber = parseInt(parts[1] || "0") || 0;
+    offset = pageNumber * perPage;
+  }
+
+  // Fetch versions ordered by created_at desc
+  const allVersions = await db
+    .select()
+    .from(issueDescriptionVersions)
+    .where(
+      and(
+        eq(issueDescriptionVersions.issueId, issueId),
+        eq(issueDescriptionVersions.projectId, project.id)
+      )
+    )
+    .orderBy(desc(issueDescriptionVersions.createdAt));
+
+  const totalCount = allVersions.length;
+  const totalPages = Math.ceil(totalCount / perPage);
+  const currentPage = Math.floor(offset / perPage);
+  const paginatedVersions = allVersions.slice(offset, offset + perPage);
+
+  const nextPageExists = currentPage + 1 < totalPages;
+  const prevPageExists = currentPage > 0;
+
+  const results = paginatedVersions.map((v) => ({
+    id: v.id,
+    workspace: v.workspaceId,
+    project: v.projectId,
+    issue: v.issueId,
+    last_saved_at: v.lastSavedAt?.toISOString() ?? null,
+    owned_by: v.ownedById,
+    created_at: v.createdAt?.toISOString() ?? null,
+    updated_at: v.updatedAt?.toISOString() ?? null,
+    created_by: v.createdById ?? null,
+    updated_by: v.updatedById ?? null,
+  }));
+
+  return c.json({
+    grouped_by: null,
+    sub_grouped_by: null,
+    total_count: totalCount,
+    next_cursor: `${perPage}:${currentPage + 1}:0`,
+    prev_cursor: `${perPage}:${currentPage > 0 ? currentPage - 1 : 0}:0`,
+    next_page_results: nextPageExists,
+    prev_page_results: prevPageExists,
+    count: results.length,
+    total_pages: totalPages,
+    extra_stats: null,
+    results,
+  });
+});
+
+// GET /:projectId/work-items/:issueId/description-versions/:versionId/ - Get specific version
+projectRoutes.get("/:projectId/work-items/:issueId/description-versions/:versionId/", async (c) => {
+  const project = c.get("project");
+  const user = c.get("user");
+  if (!project || !user) return c.json({ detail: "Not found." }, 404);
+
+  const issueId = c.req.param("issueId");
+  const versionId = c.req.param("versionId");
+
+  // Verify issue exists
+  const issue = await db.query.issues.findFirst({
+    where: and(
+      eq(issues.id, issueId),
+      eq(issues.projectId, project.id),
+      isNull(issues.deletedAt)
+    ),
+  });
+  if (!issue) return c.json({ detail: "Issue not found." }, 404);
+
+  // Guest permission check
+  const membership = c.get("projectMembership");
+  if (
+    membership &&
+    membership.role === 5 &&
+    !project.guestViewAllFeatures &&
+    issue.createdById !== user.id
+  ) {
+    return c.json({ error: "You are not allowed to view this issue" }, 403);
+  }
+
+  const version = await db.query.issueDescriptionVersions.findFirst({
+    where: and(
+      eq(issueDescriptionVersions.id, versionId),
+      eq(issueDescriptionVersions.issueId, issueId),
+      eq(issueDescriptionVersions.projectId, project.id)
+    ),
+  });
+
+  if (!version) return c.json({ detail: "Version not found." }, 404);
+
+  return c.json({
+    id: version.id,
+    workspace: version.workspaceId,
+    project: version.projectId,
+    issue: version.issueId,
+    description_html: version.descriptionHtml ?? "",
+    description_stripped: version.descriptionStripped ?? "",
+    description_json: version.descriptionJson ?? {},
+    last_saved_at: version.lastSavedAt?.toISOString() ?? null,
+    owned_by: version.ownedById,
+    created_at: version.createdAt?.toISOString() ?? null,
+    updated_at: version.updatedAt?.toISOString() ?? null,
+    created_by: version.createdById ?? null,
+    updated_by: version.updatedById ?? null,
+  });
 });
 
 export { projectRoutes };
