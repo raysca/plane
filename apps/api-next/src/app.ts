@@ -16,6 +16,7 @@ import { workspaceSlugCheckRoutes } from "./routes/workspace-slug-check";
 import { externalRoutes } from "./routes/external";
 import { assetRoutes } from "./routes/assets";
 import { timezoneRoutes } from "./routes/timezones";
+import { pageRoutes } from "./routes/pages";
 
 
 // Types for context variables
@@ -113,6 +114,7 @@ app.route("/api/users/", userRoutes);
 app.route("/api/workspaces/", workspaceRoutes);
 app.route("/api/workspaces/:slug/projects/", projectRoutes);
 app.route("/api/workspaces/:slug/projects/:projectId/issues/", issueRoutes);
+app.route("/api/workspaces/:slug/projects/:projectId/pages/", pageRoutes);
 app.route("/api/workspace-slug-check/", workspaceSlugCheckRoutes);
 app.route("/api/unsplash/", externalRoutes);
 app.route("/api/assets/v2/", assetRoutes);

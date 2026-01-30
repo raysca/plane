@@ -27,6 +27,8 @@ import {
 } from "../db/schema/module";
 import {
     pages,
+    pageLabels,
+    pageVersions,
 } from "../db/schema/page";
 import {
     views,
@@ -112,6 +114,10 @@ type SeedPage = {
     access: number;
     project_id?: number;
     type?: string;
+    labels?: number[];
+    children?: SeedPage[];
+    is_locked?: boolean;
+    archived?: boolean;
 };
 
 // Helper to read JSON files
@@ -136,6 +142,60 @@ function getPriority(priority: string): number {
         none: 0,
     };
     return map[priority.toLowerCase()] || 0;
+}
+
+// Helper to seed a single page (and its children recursively)
+async function seedPage(
+    seed: SeedPage,
+    workspaceId: string,
+    projectId: string | undefined,
+    userId: string,
+    parentId: string | null,
+    labelMap: Record<number, string>,
+) {
+    const [newPage] = await db.insert(pages).values({
+        workspaceId,
+        projectId,
+        parentId,
+        name: seed.name,
+        descriptionHtml: seed.description_html,
+        accessLevel: seed.access,
+        ownedById: userId,
+        isLocked: seed.is_locked ?? false,
+        archivedAt: seed.archived ? new Date() : null,
+    }).returning();
+
+    if (!newPage) return;
+
+    console.log(`[Seeder] Created page ${newPage.name}${parentId ? " (child)" : ""}`);
+
+    // Create page labels
+    if (seed.labels?.length) {
+        for (const labelSeedId of seed.labels) {
+            const labelId = labelMap[labelSeedId];
+            if (labelId) {
+                await db.insert(pageLabels).values({
+                    pageId: newPage.id,
+                    labelId,
+                });
+            }
+        }
+    }
+
+    // Create an initial version snapshot
+    await db.insert(pageVersions).values({
+        pageId: newPage.id,
+        descriptionHtml: seed.description_html ?? null,
+        ownedById: userId,
+        lastSavedAt: new Date(),
+    });
+
+    // Recursively create children
+    if (seed.children?.length) {
+        for (const child of seed.children) {
+            await seedPage(child, workspaceId, projectId, userId, newPage.id, labelMap);
+        }
+    }
 }
 
 export async function seedWorkspace(workspaceId: string, userId: string) {
@@ -388,19 +448,9 @@ export async function seedWorkspace(workspaceId: string, userId: string) {
         const pageSeeds = await readSeedFile<SeedPage[]>("pages.json");
         if (pageSeeds?.length) {
             for (const seed of pageSeeds) {
-                let projectId: string | undefined;
-                if (seed.project_id && projectMap[seed.project_id] && seed.type === "PROJECT") {
-                    projectId = projectMap[seed.project_id];
-                }
+                const projectId = seed.project_id ? projectMap[seed.project_id] : undefined;
 
-                await db.insert(pages).values({
-                    workspaceId: workspace.id,
-                    projectId: projectId,
-                    name: seed.name,
-                    descriptionHtml: seed.description_html,
-                    accessLevel: seed.access,
-                    ownedById: userId,
-                });
+                await seedPage(seed, workspace.id, projectId, userId, null, labelMap);
             }
         }
 

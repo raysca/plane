@@ -1,4 +1,86 @@
 [
-  { "id": 1, "name": "Getting Started", "description_html": "<h2>Welcome</h2><p>This is your workspace. Use this page to document your project setup and onboarding steps.</p>", "access": 0, "project_id": 1, "type": "PROJECT" },
-  { "id": 2, "name": "Team Notes", "description_html": "<h2>Team Notes</h2><p>A shared space for team notes, meeting minutes, and decisions.</p>", "access": 0, "type": "WORKSPACE" }
+  {
+    "id": 1,
+    "name": "Getting Started",
+    "description_html": "<h2>Welcome to Your Project</h2><p>This guide will help you get up and running quickly.</p><h3>Quick Setup</h3><ol><li>Clone the repository</li><li>Install dependencies with <code>bun install</code></li><li>Copy <code>.env.example</code> to <code>.env</code></li><li>Run <code>bun dev</code> to start the development server</li></ol><h3>Project Structure</h3><p>The codebase is organized into modules for easy navigation. Refer to the Architecture page for more details.</p>",
+    "access": 0,
+    "project_id": 1,
+    "labels": [4],
+    "children": [
+      {
+        "id": 10,
+        "name": "Environment Setup",
+        "description_html": "<h3>Environment Setup</h3><p>Required tools and configuration for local development.</p><ul><li><strong>Bun</strong> v1.0+ — JavaScript runtime</li><li><strong>SQLite</strong> — Database engine</li><li><strong>Git</strong> — Version control</li></ul><p>Run <code>bun install</code> in the project root to install all dependencies.</p>",
+        "access": 0,
+        "project_id": 1,
+        "labels": [4]
+      },
+      {
+        "id": 11,
+        "name": "Deployment Guide",
+        "description_html": "<h3>Deployment</h3><p>Steps to deploy the application to production.</p><ol><li>Build the project: <code>bun run build</code></li><li>Run database migrations</li><li>Set environment variables</li><li>Start the server: <code>bun start</code></li></ol>",
+        "access": 0,
+        "project_id": 1,
+        "labels": [4]
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "name": "Architecture Overview",
+    "description_html": "<h2>Architecture Overview</h2><p>This project follows a layered architecture pattern with clear separation of concerns.</p><h3>Backend</h3><ul><li><strong>Routes</strong> — HTTP endpoint definitions using Hono</li><li><strong>Middleware</strong> — Authentication, authorization, and validation</li><li><strong>Database</strong> — Drizzle ORM with SQLite</li><li><strong>Schema</strong> — Type-safe table definitions</li></ul><h3>Frontend</h3><ul><li><strong>Components</strong> — React components with MobX state management</li><li><strong>Services</strong> — API client layer</li><li><strong>Stores</strong> — MobX observable stores</li></ul>",
+    "access": 0,
+    "project_id": 1,
+    "labels": [4]
+  },
+  {
+    "id": 3,
+    "name": "API Reference",
+    "description_html": "<h2>API Reference</h2><p>All endpoints follow RESTful conventions and return JSON responses.</p><h3>Authentication</h3><p>All API requests require a valid session cookie. Use the <code>/auth/login</code> endpoint to obtain a session.</p><h3>Common Response Codes</h3><table><tr><th>Code</th><th>Description</th></tr><tr><td>200</td><td>Success</td></tr><tr><td>201</td><td>Created</td></tr><tr><td>400</td><td>Bad Request</td></tr><tr><td>401</td><td>Unauthorized</td></tr><tr><td>403</td><td>Forbidden</td></tr><tr><td>404</td><td>Not Found</td></tr></table>",
+    "access": 0,
+    "project_id": 1,
+    "labels": [4],
+    "is_locked": true
+  },
+  {
+    "id": 4,
+    "name": "Sprint Retrospective — Week 12",
+    "description_html": "<h2>Sprint Retrospective</h2><h3>What went well</h3><ul><li>Completed all planned features ahead of schedule</li><li>Zero critical bugs in production</li><li>Great collaboration between frontend and backend teams</li></ul><h3>What could be improved</h3><ul><li>Code review turnaround time</li><li>Test coverage for edge cases</li><li>Documentation updates lagging behind feature development</li></ul><h3>Action Items</h3><ul><li>Set up automated code review reminders</li><li>Add integration test requirements to PR template</li><li>Assign documentation buddies for each feature</li></ul>",
+    "access": 0,
+    "project_id": 1,
+    "labels": []
+  },
+  {
+    "id": 5,
+    "name": "Meeting Notes — Product Sync",
+    "description_html": "<h2>Product Sync — January 2026</h2><p><strong>Attendees:</strong> Product, Engineering, Design</p><h3>Agenda</h3><ol><li>Q1 roadmap review</li><li>Feature prioritization</li><li>Design system updates</li></ol><h3>Decisions</h3><ul><li>Prioritize page collaboration features for Q1</li><li>Dark mode will ship in February release</li><li>New onboarding flow approved — design to deliver specs by EOW</li></ul><h3>Next Steps</h3><p>Engineering to provide effort estimates by Wednesday. Design to share updated mockups.</p>",
+    "access": 1,
+    "project_id": 1,
+    "labels": []
+  },
+  {
+    "id": 6,
+    "name": "Design System v2",
+    "description_html": "<h2>Design System v2</h2><p>Updated design tokens and component specifications for the new UI refresh.</p><h3>Color Palette</h3><ul><li><strong>Primary:</strong> #3B82F6</li><li><strong>Secondary:</strong> #8B5CF6</li><li><strong>Success:</strong> #22C55E</li><li><strong>Warning:</strong> #F59E0B</li><li><strong>Error:</strong> #EF4444</li></ul><h3>Typography</h3><p>Using Inter for body text and JetBrains Mono for code blocks. Base size 16px with 1.5 line height.</p><h3>Spacing Scale</h3><p>4px base unit: 4, 8, 12, 16, 24, 32, 48, 64</p>",
+    "access": 0,
+    "project_id": 1,
+    "labels": [5]
+  },
+  {
+    "id": 7,
+    "name": "Release Notes — v0.9.0",
+    "description_html": "<h2>Release Notes — v0.9.0</h2><p><em>Released: January 15, 2026</em></p><h3>New Features</h3><ul><li>Page version history with restore capability</li><li>Collaborative editing with real-time sync</li><li>Page favorites and quick access</li><li>Archive and restore pages</li></ul><h3>Improvements</h3><ul><li>Faster page load times (40% improvement)</li><li>Improved search relevance</li><li>Better mobile responsiveness</li></ul><h3>Bug Fixes</h3><ul><li>Fixed page lock state not syncing across tabs</li><li>Fixed duplicate page not preserving labels</li><li>Fixed archive not cascading to child pages</li></ul>",
+    "access": 0,
+    "project_id": 1,
+    "labels": [4],
+    "archived": true
+  },
+  {
+    "id": 8,
+    "name": "Research — Real-time Collaboration",
+    "description_html": "<h2>Real-time Collaboration Research</h2><p>Investigation into approaches for real-time collaborative editing.</p><h3>Options Evaluated</h3><ol><li><strong>Y.js (CRDT)</strong> — Conflict-free replicated data type. Excellent offline support, mature library.</li><li><strong>Operational Transformation</strong> — Used by Google Docs. Complex to implement correctly.</li><li><strong>Automerge</strong> — Another CRDT library, Rust-based. Good performance.</li></ol><h3>Recommendation</h3><p>Y.js is the recommended approach. It has the best ecosystem support, works well with popular editors (TipTap, ProseMirror), and handles offline/merge scenarios gracefully.</p><h3>Next Steps</h3><ul><li>Prototype Y.js integration with TipTap editor</li><li>Load test with 10+ concurrent editors</li><li>Evaluate WebSocket vs WebRTC for transport</li></ul>",
+    "access": 1,
+    "project_id": 1,
+    "labels": [2, 4]
+  }
 ]
