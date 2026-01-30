@@ -26,13 +26,13 @@ import { generateSlug, isValidSlug } from "../../lib/utils";
 import { seedWorkspace } from "../../lib/workspace-seeder";
 import { userProfiles } from "../../db/schema/user";
 import { notifications } from "../../db/schema/notification";
-import { issues, issueAssignees } from "../../db/schema/issue";
+import { issues, issueAssignees, issueActivities, issueSubscribers } from "../../db/schema/issue";
 import { projects, projectMembers, states, labels } from "../../db/schema/project";
 import { pages } from "../../db/schema/page";
 import { cycles, cycleIssues, cycleFavorites } from "../../db/schema/cycle";
 import { modules, moduleIssues, moduleMembers, moduleFavorites, moduleLinks } from "../../db/schema/module";
 import { views, viewFavorites } from "../../db/schema/view";
-import { sql, not, like, isNull, count, lt, max } from "drizzle-orm";
+import { sql, not, like, isNull, count, lt, gt, max } from "drizzle-orm";
 import homePreferenceRoutes from "./home-preference";
 import userPropertiesRoutes from "./user-properties";
 
@@ -2994,6 +2994,447 @@ workspaceRoutes.post("/:slug/ai-assistant/", async (c) => {
 
 workspaceRoutes.post("/:slug/rephrase-grammar/", async (c) => {
   return c.json({ detail: "Not implemented" }, 501);
+});
+
+// ===========================
+// Section: User Activity
+// ===========================
+
+workspaceRoutes.get("/:slug/user-activity/:userId/", async (c) => {
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const targetUserId = c.req.param("userId");
+
+  // Pagination params
+  const perPage = Math.min(parseInt(c.req.query("per_page") || "10", 10) || 10, 1000);
+  const cursorParam = c.req.query("cursor") || "0:0:0";
+  const [cursorLimit, cursorOffsetStr] = cursorParam.split(":");
+  const offset = parseInt(cursorOffsetStr || "0", 10) || 0;
+
+  // Optional project filter
+  const projectFilter = c.req.queries("project") ?? [];
+
+  // Get projects the requesting user is a member of (active, non-archived)
+  const memberProjects = await db
+    .select({ projectId: projectMembers.projectId })
+    .from(projectMembers)
+    .innerJoin(projects, eq(projects.id, projectMembers.projectId))
+    .where(
+      and(
+        eq(projectMembers.memberId, user.id),
+        eq(projectMembers.isActive, true),
+        isNull(projects.archivedAt)
+      )
+    );
+
+  const memberProjectIds = memberProjects.map((p) => p.projectId);
+  if (memberProjectIds.length === 0) {
+    return c.json({
+      grouped_by: null,
+      sub_grouped_by: null,
+      total_count: 0,
+      next_cursor: `${perPage}:${perPage}:0`,
+      prev_cursor: `${perPage}:0:0`,
+      next_page_results: false,
+      prev_page_results: false,
+      count: 0,
+      total_pages: 0,
+      total_results: 0,
+      extra_stats: null,
+      results: [],
+    });
+  }
+
+  // Apply project filter if provided
+  const filteredProjectIds =
+    projectFilter.length > 0
+      ? memberProjectIds.filter((id) => projectFilter.includes(id))
+      : memberProjectIds;
+
+  if (filteredProjectIds.length === 0) {
+    return c.json({
+      grouped_by: null,
+      sub_grouped_by: null,
+      total_count: 0,
+      next_cursor: `${perPage}:${perPage}:0`,
+      prev_cursor: `${perPage}:0:0`,
+      next_page_results: false,
+      prev_page_results: false,
+      count: 0,
+      total_pages: 0,
+      total_results: 0,
+      extra_stats: null,
+      results: [],
+    });
+  }
+
+  // Excluded fields (matching Django: comment, vote, reaction, draft)
+  const excludedFields = ["comment", "vote", "reaction", "draft"];
+
+  // Count total
+  const [totalRow] = await db
+    .select({ count: count() })
+    .from(issueActivities)
+    .where(
+      and(
+        eq(issueActivities.workspaceId, workspace.id),
+        eq(issueActivities.actorId, targetUserId),
+        inArray(issueActivities.projectId, filteredProjectIds),
+        not(inArray(issueActivities.field, excludedFields))
+      )
+    );
+  const totalCount = totalRow?.count ?? 0;
+
+  // Fetch paginated activities
+  const activities = await db.query.issueActivities.findMany({
+    where: and(
+      eq(issueActivities.workspaceId, workspace.id),
+      eq(issueActivities.actorId, targetUserId),
+      inArray(issueActivities.projectId, filteredProjectIds),
+      not(inArray(issueActivities.field, excludedFields))
+    ),
+    orderBy: [desc(issueActivities.createdAt)],
+    limit: perPage,
+    offset,
+    with: {
+      actor: true,
+      issue: true,
+      project: true,
+      workspace: true,
+    },
+  });
+
+  const hasNext = offset + perPage < totalCount;
+  const hasPrev = offset > 0;
+  const nextOffset = offset + perPage;
+  const prevOffset = Math.max(0, offset - perPage);
+  const totalPages = Math.ceil(totalCount / perPage);
+
+  const results = activities.map((a: any) => ({
+    id: a.id,
+    issue: a.issueId,
+    verb: a.verb,
+    field: a.field ?? null,
+    old_value: a.oldValue ?? null,
+    new_value: a.newValue ?? null,
+    old_identifier: a.oldIdentifier ?? null,
+    new_identifier: a.newIdentifier ?? null,
+    epoch: a.epochTimestamp ?? null,
+    actor: a.actorId,
+    project: a.projectId,
+    workspace: a.workspaceId,
+    created_at: a.createdAt?.toISOString() ?? null,
+    updated_at: a.createdAt?.toISOString() ?? null,
+    actor_detail: a.actor
+      ? {
+          id: a.actor.id,
+          first_name: a.actor.firstName ?? a.actor.name?.split(" ")[0] ?? "",
+          last_name: a.actor.lastName ?? a.actor.name?.split(" ").slice(1).join(" ") ?? "",
+          avatar: a.actor.avatar ?? a.actor.image ?? "",
+          avatar_url: a.actor.avatar ?? a.actor.image ?? "",
+          display_name: a.actor.displayName ?? a.actor.name ?? "",
+          is_bot: false,
+        }
+      : null,
+    issue_detail: a.issue
+      ? {
+          id: a.issue.id,
+          name: a.issue.name,
+          description_html: a.issue.descriptionHtml ?? "",
+          priority: a.issue.priority ?? 0,
+          sequence_id: a.issue.sequenceId ?? null,
+          sort_order: a.issue.sortOrder ?? 65535,
+          is_draft: false,
+        }
+      : null,
+    project_detail: a.project
+      ? {
+          id: a.project.id,
+          identifier: a.project.identifier,
+          name: a.project.name,
+        }
+      : null,
+    workspace_detail: a.workspace
+      ? {
+          id: a.workspace.id,
+          name: a.workspace.name,
+          slug: a.workspace.slug,
+        }
+      : null,
+  }));
+
+  return c.json({
+    grouped_by: null,
+    sub_grouped_by: null,
+    total_count: totalCount,
+    next_cursor: `${perPage}:${nextOffset}:0`,
+    prev_cursor: `${perPage}:${prevOffset}:0`,
+    next_page_results: hasNext,
+    prev_page_results: hasPrev,
+    count: results.length,
+    total_pages: totalPages,
+    total_results: totalCount,
+    extra_stats: null,
+    results,
+  });
+});
+
+// ===========================
+// Section: User Profile Stats
+// ===========================
+
+workspaceRoutes.get("/:slug/user-stats/:userId/", async (c) => {
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const targetUserId = c.req.param("userId");
+
+  // Get projects the requesting user is an active member of (non-archived)
+  const memberProjects = await db
+    .select({ projectId: projectMembers.projectId })
+    .from(projectMembers)
+    .innerJoin(projects, eq(projectMembers.projectId, projects.id))
+    .where(
+      and(
+        eq(projectMembers.memberId, user.id),
+        eq(projectMembers.isActive, true),
+        eq(projects.workspaceId, workspace.id),
+        isNull(projects.archivedAt)
+      )
+    );
+
+  const memberProjectIds = memberProjects.map((p) => p.projectId);
+
+  if (memberProjectIds.length === 0) {
+    return c.json({
+      state_distribution: [],
+      priority_distribution: [],
+      created_issues: 0,
+      assigned_issues: 0,
+      completed_issues: 0,
+      pending_issues: 0,
+      subscribed_issues: 0,
+      present_cycles: [],
+      upcoming_cycles: [],
+    });
+  }
+
+  // Priority integer-to-string mapping (matching Django's string priority values)
+  const priorityNames: Record<number, string> = {
+    0: "none",
+    1: "urgent",
+    2: "high",
+    3: "medium",
+    4: "low",
+  };
+
+  const priorityOrder: Record<string, number> = {
+    urgent: 0,
+    high: 1,
+    medium: 2,
+    low: 3,
+    none: 4,
+  };
+
+  // Base condition: issues assigned to target user in workspace projects the requesting user can see
+  // Issues must not be deleted and assignee must not be soft-deleted
+  const assignedIssuesBase = db
+    .select({ issueId: issues.id, stateId: issues.stateId, priority: issues.priority })
+    .from(issues)
+    .innerJoin(issueAssignees, eq(issues.id, issueAssignees.issueId))
+    .where(
+      and(
+        eq(issueAssignees.assigneeId, targetUserId),
+        eq(issues.workspaceId, workspace.id),
+        inArray(issues.projectId, memberProjectIds),
+        isNull(issues.deletedAt),
+        isNull(issues.archivedAt)
+      )
+    );
+
+  // State distribution: count issues grouped by state group
+  const stateDistribution = await db
+    .select({
+      state_group: states.group,
+      state_count: count(),
+    })
+    .from(issues)
+    .innerJoin(issueAssignees, eq(issues.id, issueAssignees.issueId))
+    .innerJoin(states, eq(issues.stateId, states.id))
+    .where(
+      and(
+        eq(issueAssignees.assigneeId, targetUserId),
+        eq(issues.workspaceId, workspace.id),
+        inArray(issues.projectId, memberProjectIds),
+        isNull(issues.deletedAt),
+        isNull(issues.archivedAt)
+      )
+    )
+    .groupBy(states.group)
+    .orderBy(states.group);
+
+  // Priority distribution: count issues grouped by priority
+  const priorityDistributionRaw = await db
+    .select({
+      priority: issues.priority,
+      priority_count: count(),
+    })
+    .from(issues)
+    .innerJoin(issueAssignees, eq(issues.id, issueAssignees.issueId))
+    .where(
+      and(
+        eq(issueAssignees.assigneeId, targetUserId),
+        eq(issues.workspaceId, workspace.id),
+        inArray(issues.projectId, memberProjectIds),
+        isNull(issues.deletedAt),
+        isNull(issues.archivedAt)
+      )
+    )
+    .groupBy(issues.priority);
+
+  // Map integer priorities to string names and sort by priority order
+  const priorityDistribution = priorityDistributionRaw
+    .filter((p) => p.priority_count >= 1)
+    .map((p) => ({
+      priority: priorityNames[p.priority ?? 0] ?? "none",
+      priority_count: p.priority_count,
+    }))
+    .sort((a, b) => (priorityOrder[a.priority] ?? 99) - (priorityOrder[b.priority] ?? 99));
+
+  // Created issues count
+  const [createdResult] = await db
+    .select({ count: count() })
+    .from(issues)
+    .where(
+      and(
+        eq(issues.createdById, targetUserId),
+        eq(issues.workspaceId, workspace.id),
+        inArray(issues.projectId, memberProjectIds),
+        isNull(issues.deletedAt),
+        isNull(issues.archivedAt)
+      )
+    );
+
+  // Assigned issues count
+  const [assignedResult] = await db
+    .select({ count: count() })
+    .from(issues)
+    .innerJoin(issueAssignees, eq(issues.id, issueAssignees.issueId))
+    .where(
+      and(
+        eq(issueAssignees.assigneeId, targetUserId),
+        eq(issues.workspaceId, workspace.id),
+        inArray(issues.projectId, memberProjectIds),
+        isNull(issues.deletedAt),
+        isNull(issues.archivedAt)
+      )
+    );
+
+  // Completed issues count (state group = 'completed')
+  const [completedResult] = await db
+    .select({ count: count() })
+    .from(issues)
+    .innerJoin(issueAssignees, eq(issues.id, issueAssignees.issueId))
+    .innerJoin(states, eq(issues.stateId, states.id))
+    .where(
+      and(
+        eq(issueAssignees.assigneeId, targetUserId),
+        eq(issues.workspaceId, workspace.id),
+        inArray(issues.projectId, memberProjectIds),
+        eq(states.group, "completed"),
+        isNull(issues.deletedAt),
+        isNull(issues.archivedAt)
+      )
+    );
+
+  // Pending issues count (state group NOT in 'completed', 'cancelled')
+  const [pendingResult] = await db
+    .select({ count: count() })
+    .from(issues)
+    .innerJoin(issueAssignees, eq(issues.id, issueAssignees.issueId))
+    .innerJoin(states, eq(issues.stateId, states.id))
+    .where(
+      and(
+        eq(issueAssignees.assigneeId, targetUserId),
+        eq(issues.workspaceId, workspace.id),
+        inArray(issues.projectId, memberProjectIds),
+        not(inArray(states.group, ["completed", "cancelled"])),
+        isNull(issues.deletedAt),
+        isNull(issues.archivedAt)
+      )
+    );
+
+  // Subscribed issues count
+  const [subscribedResult] = await db
+    .select({ count: count() })
+    .from(issueSubscribers)
+    .innerJoin(projects, eq(issueSubscribers.projectId, projects.id))
+    .where(
+      and(
+        eq(issueSubscribers.subscriberId, targetUserId),
+        eq(issueSubscribers.workspaceId, workspace.id),
+        inArray(issueSubscribers.projectId, memberProjectIds),
+        isNull(projects.archivedAt)
+      )
+    );
+
+  const now = new Date();
+
+  // Present cycles: cycles where start_date < now < end_date, with issues assigned to target user
+  const presentCyclesRaw = await db
+    .select({
+      cycle__name: cycles.name,
+      cycle__id: cycles.id,
+      cycle__project_id: cycles.projectId,
+    })
+    .from(cycleIssues)
+    .innerJoin(cycles, eq(cycleIssues.cycleId, cycles.id))
+    .innerJoin(issues, eq(cycleIssues.issueId, issues.id))
+    .innerJoin(issueAssignees, eq(issues.id, issueAssignees.issueId))
+    .where(
+      and(
+        eq(cycles.workspaceId, workspace.id),
+        lt(cycles.startDate, now),
+        gt(cycles.endDate, now),
+        eq(issueAssignees.assigneeId, targetUserId)
+      )
+    )
+    .groupBy(cycles.id, cycles.name, cycles.projectId);
+
+  // Upcoming cycles: cycles where start_date > now, with issues assigned to target user
+  const upcomingCyclesRaw = await db
+    .select({
+      cycle__name: cycles.name,
+      cycle__id: cycles.id,
+      cycle__project_id: cycles.projectId,
+    })
+    .from(cycleIssues)
+    .innerJoin(cycles, eq(cycleIssues.cycleId, cycles.id))
+    .innerJoin(issues, eq(cycleIssues.issueId, issues.id))
+    .innerJoin(issueAssignees, eq(issues.id, issueAssignees.issueId))
+    .where(
+      and(
+        eq(cycles.workspaceId, workspace.id),
+        gt(cycles.startDate, now),
+        eq(issueAssignees.assigneeId, targetUserId)
+      )
+    )
+    .groupBy(cycles.id, cycles.name, cycles.projectId);
+
+  return c.json({
+    state_distribution: stateDistribution,
+    priority_distribution: priorityDistribution,
+    created_issues: createdResult?.count ?? 0,
+    assigned_issues: assignedResult?.count ?? 0,
+    completed_issues: completedResult?.count ?? 0,
+    pending_issues: pendingResult?.count ?? 0,
+    subscribed_issues: subscribedResult?.count ?? 0,
+    present_cycles: presentCyclesRaw,
+    upcoming_cycles: upcomingCyclesRaw,
+  });
 });
 
 export { workspaceRoutes };
