@@ -16,7 +16,8 @@ import {
 import { workspaces, workspaceMembers, favorites, recentVisits } from "../../db/schema/workspace";
 import { cycles, cycleIssues, cycleFavorites, cycleUserProperties } from "../../db/schema/cycle";
 import { modules, moduleIssues, moduleMembers, moduleFavorites, moduleLinks, moduleUserProperties } from "../../db/schema/module";
-import { issues, issueAssignees, issueDescriptionVersions, issueComments, commentReactions } from "../../db/schema/issue";
+import { issues, issueAssignees, issueLabels, issueLinks, issueDescriptionVersions, issueComments, commentReactions } from "../../db/schema/issue";
+import { fileAssets } from "../../db/schema/asset";
 import { views, viewFavorites } from "../../db/schema/view";
 import { authMiddleware, ROLES } from "../../middleware/auth";
 import {
@@ -2746,6 +2747,288 @@ projectRoutes.post(
     }
 
     return c.json({ message: "Success" });
+  }
+);
+
+// =====================================================
+// 4.7.4b Cycle Issues CRUD
+// =====================================================
+
+// GET /:projectId/cycles/:cycleId/cycle-issues/ - List issues in a cycle
+projectRoutes.get("/:projectId/cycles/:cycleId/cycle-issues/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const cycleId = c.req.param("cycleId");
+
+  // Verify cycle exists
+  const cycle = await db.query.cycles.findFirst({
+    where: and(eq(cycles.id, cycleId), eq(cycles.projectId, project.id)),
+  });
+  if (!cycle) return c.json({ detail: "Cycle not found." }, 404);
+
+  // Pagination
+  const perPage = Math.min(parseInt(c.req.query("per_page") || "100", 10) || 100, 1000);
+  const cursorParam = c.req.query("cursor") || "0:0:0";
+  const [, cursorOffsetStr] = cursorParam.split(":");
+  const offset = parseInt(cursorOffsetStr || "0", 10) || 0;
+
+  // Get issue IDs in this cycle
+  const cycleIssueRows = await db
+    .select({ issueId: cycleIssues.issueId })
+    .from(cycleIssues)
+    .where(eq(cycleIssues.cycleId, cycleId));
+
+  const issueIds = cycleIssueRows.map((r) => r.issueId);
+
+  if (issueIds.length === 0) {
+    return c.json({
+      grouped_by: null,
+      sub_grouped_by: null,
+      total_count: 0,
+      next_cursor: `${perPage}:${perPage}:0`,
+      prev_cursor: `${perPage}:0:0`,
+      next_page_results: false,
+      prev_page_results: false,
+      count: 0,
+      total_pages: 0,
+      total_results: 0,
+      extra_stats: null,
+      results: [],
+    });
+  }
+
+  // Fetch issues (non-archived, non-deleted, non-draft)
+  const issueList = await db.query.issues.findMany({
+    where: and(
+      inArray(issues.id, issueIds),
+      eq(issues.projectId, project.id),
+      isNull(issues.archivedAt),
+      isNull(issues.deletedAt)
+    ),
+    orderBy: [desc(issues.createdAt)],
+  });
+
+  const totalCount = issueList.length;
+
+  // Fetch all related data in parallel
+  const allIds = issueList.map((i) => i.id);
+
+  const [assigneeRows, labelRows, moduleRows, cycleRows, subCountRows, linkCountRows, attachmentCountRows, stateRows] = await Promise.all([
+    allIds.length > 0 ? db.select({ issueId: issueAssignees.issueId, assigneeId: issueAssignees.assigneeId }).from(issueAssignees).where(inArray(issueAssignees.issueId, allIds)) : [],
+    allIds.length > 0 ? db.select({ issueId: issueLabels.issueId, labelId: issueLabels.labelId }).from(issueLabels).where(inArray(issueLabels.issueId, allIds)) : [],
+    allIds.length > 0 ? db.select({ issueId: moduleIssues.issueId, moduleId: moduleIssues.moduleId }).from(moduleIssues).where(inArray(moduleIssues.issueId, allIds)) : [],
+    allIds.length > 0 ? db.select({ issueId: cycleIssues.issueId, cycleId: cycleIssues.cycleId }).from(cycleIssues).where(inArray(cycleIssues.issueId, allIds)) : [],
+    allIds.length > 0 ? db.select({ parentId: issues.parentId, count: countFn() }).from(issues).where(and(inArray(issues.parentId, allIds), isNull(issues.deletedAt))).groupBy(issues.parentId) : [],
+    allIds.length > 0 ? db.select({ issueId: issueLinks.issueId, count: countFn() }).from(issueLinks).where(inArray(issueLinks.issueId, allIds)).groupBy(issueLinks.issueId) : [],
+    allIds.length > 0 ? db.select({ entityIdentifier: fileAssets.entityIdentifier, count: countFn() }).from(fileAssets).where(and(inArray(fileAssets.entityIdentifier, allIds), eq(fileAssets.entityType, "issue_attachment"), eq(fileAssets.isDeleted, false))).groupBy(fileAssets.entityIdentifier) : [],
+    allIds.length > 0 ? db.select({ id: states.id, group: states.group }).from(states).where(eq(states.projectId, project.id)) : [],
+  ]);
+
+  // Build lookup maps
+  const assigneeMap = new Map<string, string[]>();
+  for (const r of assigneeRows) {
+    const existing = assigneeMap.get(r.issueId) ?? [];
+    existing.push(r.assigneeId);
+    assigneeMap.set(r.issueId, existing);
+  }
+
+  const labelMap = new Map<string, string[]>();
+  for (const r of labelRows) {
+    const existing = labelMap.get(r.issueId) ?? [];
+    existing.push(r.labelId);
+    labelMap.set(r.issueId, existing);
+  }
+
+  const moduleMap = new Map<string, string[]>();
+  for (const r of moduleRows) {
+    const existing = moduleMap.get(r.issueId) ?? [];
+    existing.push(r.moduleId);
+    moduleMap.set(r.issueId, existing);
+  }
+
+  const cycleMap = new Map<string, string>();
+  for (const r of cycleRows) {
+    cycleMap.set(r.issueId, r.cycleId);
+  }
+
+  const subCountMap = new Map<string, number>();
+  for (const r of subCountRows) {
+    if (r.parentId) subCountMap.set(r.parentId, r.count);
+  }
+
+  const linkCountMap = new Map<string, number>();
+  for (const r of linkCountRows) {
+    linkCountMap.set(r.issueId, r.count);
+  }
+
+  const attachmentCountMap = new Map<string, number>();
+  for (const r of attachmentCountRows) {
+    if (r.entityIdentifier) attachmentCountMap.set(r.entityIdentifier, r.count);
+  }
+
+  const stateGroupMap = new Map<string, string>();
+  for (const s of stateRows) {
+    stateGroupMap.set(s.id, s.group);
+  }
+
+  // Paginate
+  const paginatedIssues = issueList.slice(offset, offset + perPage);
+
+  const results = paginatedIssues.map((issue) => ({
+    id: issue.id,
+    project_id: issue.projectId,
+    workspace_id: issue.workspaceId,
+    parent_id: issue.parentId ?? null,
+    state_id: issue.stateId ?? null,
+    state__group: issue.stateId ? (stateGroupMap.get(issue.stateId) ?? "backlog") : "backlog",
+    name: issue.name,
+    description_html: issue.descriptionHtml ?? "",
+    description_stripped: issue.descriptionStripped ?? "",
+    priority: issue.priority ?? 0,
+    sort_order: issue.sortOrder ?? 65535,
+    start_date: issue.startDate?.toISOString()?.split("T")[0] ?? null,
+    target_date: issue.targetDate?.toISOString()?.split("T")[0] ?? null,
+    completed_at: issue.completedAt?.toISOString() ?? null,
+    archived_at: issue.archivedAt?.toISOString() ?? null,
+    sequence_id: issue.sequenceId ?? null,
+    estimate_point: issue.estimatePoint ?? null,
+    is_epic: issue.isEpic ?? false,
+    assignee_ids: assigneeMap.get(issue.id) ?? [],
+    label_ids: labelMap.get(issue.id) ?? [],
+    module_ids: moduleMap.get(issue.id) ?? [],
+    cycle_id: cycleMap.get(issue.id) ?? cycleId,
+    sub_issues_count: subCountMap.get(issue.id) ?? 0,
+    attachment_count: attachmentCountMap.get(issue.id) ?? 0,
+    link_count: linkCountMap.get(issue.id) ?? 0,
+    created_by: issue.createdById ?? null,
+    updated_by: issue.updatedById ?? null,
+    created_at: issue.createdAt?.toISOString() ?? null,
+    updated_at: issue.updatedAt?.toISOString() ?? null,
+  }));
+
+  const hasNext = offset + perPage < totalCount;
+  const hasPrev = offset > 0;
+  const nextOffset = offset + perPage;
+  const prevOffset = Math.max(0, offset - perPage);
+  const totalPages = Math.ceil(totalCount / perPage);
+
+  return c.json({
+    grouped_by: null,
+    sub_grouped_by: null,
+    total_count: totalCount,
+    next_cursor: `${perPage}:${nextOffset}:0`,
+    prev_cursor: `${perPage}:${prevOffset}:0`,
+    next_page_results: hasNext,
+    prev_page_results: hasPrev,
+    count: results.length,
+    total_pages: totalPages,
+    total_results: totalCount,
+    extra_stats: null,
+    results,
+  });
+});
+
+// POST /:projectId/cycles/:cycleId/cycle-issues/ - Add issues to a cycle
+projectRoutes.post(
+  "/:projectId/cycles/:cycleId/cycle-issues/",
+  requireProjectMember,
+  zValidator("json", z.object({ issues: z.array(z.string()).min(1) })),
+  async (c) => {
+    const project = c.get("project");
+    const workspace = c.get("workspace");
+    const user = c.get("user");
+    if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+    const cycleId = c.req.param("cycleId");
+    const body = c.req.valid("json");
+
+    // Verify cycle exists and is not completed
+    const cycle = await db.query.cycles.findFirst({
+      where: and(eq(cycles.id, cycleId), eq(cycles.projectId, project.id)),
+    });
+    if (!cycle) return c.json({ error: "Cycle not found" }, 404);
+
+    if (cycle.endDate && cycle.endDate < new Date()) {
+      return c.json(
+        { error: "The Cycle has already been completed so no new issues can be added" },
+        400
+      );
+    }
+
+    const issueIdsToAdd = body.issues;
+
+    // Find issues that are already in other cycles (need to be moved)
+    const existingCycleIssues = await db
+      .select({ id: cycleIssues.id, issueId: cycleIssues.issueId, cycleId: cycleIssues.cycleId })
+      .from(cycleIssues)
+      .where(
+        and(
+          inArray(cycleIssues.issueId, issueIdsToAdd),
+          ne(cycleIssues.cycleId, cycleId)
+        )
+      );
+
+    const existingIssueIds = new Set(existingCycleIssues.map((ci) => ci.issueId));
+    const newIssueIds = issueIdsToAdd.filter((id) => !existingIssueIds.has(id));
+
+    // Also check for issues already in this cycle
+    const alreadyInCycle = await db
+      .select({ issueId: cycleIssues.issueId })
+      .from(cycleIssues)
+      .where(
+        and(
+          eq(cycleIssues.cycleId, cycleId),
+          inArray(cycleIssues.issueId, issueIdsToAdd)
+        )
+      );
+    const alreadyInCycleSet = new Set(alreadyInCycle.map((ci) => ci.issueId));
+    const trulyNewIssueIds = newIssueIds.filter((id) => !alreadyInCycleSet.has(id));
+
+    // Create new cycle-issue records
+    if (trulyNewIssueIds.length > 0) {
+      await db.insert(cycleIssues).values(
+        trulyNewIssueIds.map((issueId) => ({
+          cycleId,
+          issueId,
+        }))
+      );
+    }
+
+    // Move existing issues from other cycles to this cycle
+    if (existingCycleIssues.length > 0) {
+      for (const ci of existingCycleIssues) {
+        await db.update(cycleIssues).set({ cycleId }).where(eq(cycleIssues.id, ci.id));
+      }
+    }
+
+    return c.json({ message: "success" }, 201);
+  }
+);
+
+// DELETE /:projectId/cycles/:cycleId/cycle-issues/:issueId/ - Remove issue from cycle
+projectRoutes.delete(
+  "/:projectId/cycles/:cycleId/cycle-issues/:issueId/",
+  requireProjectMember,
+  async (c) => {
+    const project = c.get("project");
+    if (!project) return c.json({ detail: "Not found." }, 404);
+
+    const cycleId = c.req.param("cycleId");
+    const issueId = c.req.param("issueId");
+
+    const deleted = await db
+      .delete(cycleIssues)
+      .where(
+        and(
+          eq(cycleIssues.cycleId, cycleId),
+          eq(cycleIssues.issueId, issueId)
+        )
+      );
+
+    return new Response(null, { status: 204 });
   }
 );
 
