@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { eq, and, desc, asc, isNull, inArray, sql, count as countFn, max, like } from "drizzle-orm";
+import { eq, and, or, desc, asc, isNull, isNotNull, inArray, sql, count as countFn, max, like, lt, lte, gte, ne } from "drizzle-orm";
 import { db } from "../../db";
 import { users } from "../../db/schema/user";
 import {
@@ -14,8 +14,9 @@ import {
   projectUserProperties,
 } from "../../db/schema/project";
 import { workspaces, workspaceMembers, favorites, recentVisits } from "../../db/schema/workspace";
-import { cycles, cycleUserProperties } from "../../db/schema/cycle";
-import { modules, moduleUserProperties } from "../../db/schema/module";
+import { cycles, cycleIssues, cycleFavorites, cycleUserProperties } from "../../db/schema/cycle";
+import { modules, moduleIssues, moduleMembers, moduleFavorites, moduleLinks, moduleUserProperties } from "../../db/schema/module";
+import { issues, issueAssignees } from "../../db/schema/issue";
 import { authMiddleware, ROLES } from "../../middleware/auth";
 import {
   workspaceMiddleware,
@@ -1684,7 +1685,753 @@ projectRoutes.patch(
 );
 
 // =====================================================
-// 4.7 Cycle User Properties
+// 4.7 Project Cycles CRUD
+// =====================================================
+
+// Helper: compute cycle status from dates
+function computeCycleStatus(startDate: Date | null, endDate: Date | null): string {
+  const now = new Date();
+  if (!startDate && !endDate) return "DRAFT";
+  if (startDate && endDate) {
+    if (startDate <= now && endDate >= now) return "CURRENT";
+    if (startDate > now) return "UPCOMING";
+    if (endDate < now) return "COMPLETED";
+  }
+  return "DRAFT";
+}
+
+// Helper: format a single cycle row for JSON response
+function formatCycle(
+  c: typeof cycles.$inferSelect,
+  stats: { total: number; completed: number; cancelled: number; started: number; unstarted: number; backlog: number },
+  isFavorite: boolean,
+  assigneeIds: string[],
+  extra: Record<string, any> = {}
+) {
+  return {
+    id: c.id,
+    workspace_id: c.workspaceId,
+    project_id: c.projectId,
+    name: c.name,
+    description: c.description ?? "",
+    start_date: c.startDate?.toISOString() ?? null,
+    end_date: c.endDate?.toISOString() ?? null,
+    owned_by_id: c.ownedById ?? null,
+    view_props: c.viewProps ?? {},
+    sort_order: c.sortOrder ?? 65535,
+    progress_snapshot: c.progressSnapshot ?? null,
+    is_favorite: isFavorite,
+    total_issues: stats.total,
+    completed_issues: stats.completed,
+    cancelled_issues: stats.cancelled,
+    started_issues: stats.started ?? 0,
+    unstarted_issues: stats.unstarted ?? 0,
+    backlog_issues: stats.backlog ?? 0,
+    assignee_ids: assigneeIds,
+    status: computeCycleStatus(c.startDate, c.endDate),
+    archived_at: c.archivedAt?.toISOString() ?? null,
+    created_at: c.createdAt?.toISOString() ?? null,
+    updated_at: c.updatedAt?.toISOString() ?? null,
+    ...extra,
+  };
+}
+
+// Helper: compute issue statistics for a set of cycle IDs
+async function getCycleIssueStats(cycleIdList: string[]) {
+  if (cycleIdList.length === 0) return new Map();
+
+  const issueStats = await db
+    .select({
+      cycleId: cycleIssues.cycleId,
+      stateGroup: states.group,
+      issueCount: countFn(),
+    })
+    .from(cycleIssues)
+    .innerJoin(issues, eq(cycleIssues.issueId, issues.id))
+    .innerJoin(states, eq(issues.stateId, states.id))
+    .where(
+      and(
+        inArray(cycleIssues.cycleId, cycleIdList),
+        isNull(issues.archivedAt),
+        isNull(issues.deletedAt)
+      )
+    )
+    .groupBy(cycleIssues.cycleId, states.group);
+
+  const statsMap = new Map<
+    string,
+    { total: number; completed: number; cancelled: number; started: number; unstarted: number; backlog: number }
+  >();
+
+  for (const row of issueStats) {
+    const existing = statsMap.get(row.cycleId) || { total: 0, completed: 0, cancelled: 0, started: 0, unstarted: 0, backlog: 0 };
+    const cnt = Number(row.issueCount);
+    existing.total += cnt;
+    switch (row.stateGroup) {
+      case "completed": existing.completed += cnt; break;
+      case "cancelled": existing.cancelled += cnt; break;
+      case "started": existing.started += cnt; break;
+      case "unstarted": existing.unstarted += cnt; break;
+      case "backlog": existing.backlog += cnt; break;
+    }
+    statsMap.set(row.cycleId, existing);
+  }
+  return statsMap;
+}
+
+// Helper: get assignee IDs per cycle
+async function getCycleAssigneeIds(cycleIdList: string[]) {
+  if (cycleIdList.length === 0) return new Map<string, string[]>();
+
+  const rows = await db
+    .select({
+      cycleId: cycleIssues.cycleId,
+      assigneeId: issueAssignees.assigneeId,
+    })
+    .from(cycleIssues)
+    .innerJoin(issues, eq(cycleIssues.issueId, issues.id))
+    .innerJoin(issueAssignees, eq(issues.id, issueAssignees.issueId))
+    .where(
+      and(
+        inArray(cycleIssues.cycleId, cycleIdList),
+        isNull(issues.archivedAt),
+        isNull(issues.deletedAt)
+      )
+    );
+
+  const map = new Map<string, Set<string>>();
+  for (const r of rows) {
+    if (!map.has(r.cycleId)) map.set(r.cycleId, new Set());
+    map.get(r.cycleId)!.add(r.assigneeId);
+  }
+  const result = new Map<string, string[]>();
+  for (const [k, v] of map) result.set(k, Array.from(v));
+  return result;
+}
+
+// Helper: get user favorite cycle IDs
+async function getUserFavoriteCycleIds(cycleIdList: string[], userId: string) {
+  if (cycleIdList.length === 0) return new Set<string>();
+  const favs = await db
+    .select({ cycleId: cycleFavorites.cycleId })
+    .from(cycleFavorites)
+    .where(and(inArray(cycleFavorites.cycleId, cycleIdList), eq(cycleFavorites.userId, userId)));
+  return new Set(favs.map((f) => f.cycleId));
+}
+
+// GET /:projectId/cycles/ - List project cycles
+projectRoutes.get("/:projectId/cycles/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const cycleView = c.req.query("cycle_view") || "all";
+
+  // Fetch all non-archived cycles
+  let allCycles = await db
+    .select()
+    .from(cycles)
+    .where(and(eq(cycles.projectId, project.id), isNull(cycles.archivedAt)))
+    .orderBy(desc(cycles.createdAt));
+
+  // Filter by current if requested
+  if (cycleView === "current") {
+    const now = new Date();
+    allCycles = allCycles.filter(
+      (cy) => cy.startDate && cy.endDate && cy.startDate <= now && cy.endDate >= now
+    );
+  }
+
+  if (allCycles.length === 0) return c.json([]);
+
+  const cycleIdList = allCycles.map((cy) => cy.id);
+
+  const [statsMap, assigneeMap, favSet] = await Promise.all([
+    getCycleIssueStats(cycleIdList),
+    getCycleAssigneeIds(cycleIdList),
+    getUserFavoriteCycleIds(cycleIdList, user.id),
+  ]);
+
+  const result = allCycles.map((cy) => {
+    const stats = statsMap.get(cy.id) || { total: 0, completed: 0, cancelled: 0, started: 0, unstarted: 0, backlog: 0 };
+    return formatCycle(cy, stats, favSet.has(cy.id), assigneeMap.get(cy.id) || []);
+  });
+
+  // Sort: favorites first, then by created_at descending
+  result.sort((a, b) => {
+    if (a.is_favorite !== b.is_favorite) return a.is_favorite ? -1 : 1;
+    return 0;
+  });
+
+  return c.json(result);
+});
+
+// POST /:projectId/cycles/ - Create cycle
+const createCycleSchema = z.object({
+  name: z.string().min(1),
+  description: z.string().optional(),
+  start_date: z.string().nullable().optional(),
+  end_date: z.string().nullable().optional(),
+  owned_by_id: z.string().optional(),
+  sort_order: z.number().optional(),
+});
+
+projectRoutes.post(
+  "/:projectId/cycles/",
+  zValidator("json", createCycleSchema),
+  async (c) => {
+    const project = c.get("project");
+    const workspace = c.get("workspace");
+    const user = c.get("user");
+    if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+    const body = c.req.valid("json");
+
+    // Both dates must be present or both null
+    const hasStart = body.start_date !== null && body.start_date !== undefined && body.start_date !== "";
+    const hasEnd = body.end_date !== null && body.end_date !== undefined && body.end_date !== "";
+    if (hasStart !== hasEnd) {
+      return c.json({ error: "Both start date and end date are either required or are to be null" }, 400);
+    }
+
+    let startDate: Date | null = null;
+    let endDate: Date | null = null;
+    if (hasStart && hasEnd) {
+      startDate = new Date(body.start_date!);
+      endDate = new Date(body.end_date!);
+      if (startDate > endDate) {
+        return c.json({ error: "Start date cannot exceed end date" }, 400);
+      }
+    }
+
+    // Auto sort_order
+    let sortOrder = body.sort_order;
+    if (sortOrder === undefined) {
+      const maxResult = await db.select({ largest: max(cycles.sortOrder) }).from(cycles).where(eq(cycles.projectId, project.id));
+      sortOrder = maxResult[0]?.largest != null ? maxResult[0].largest + 10000 : 65535;
+    }
+
+    const [created] = await db
+      .insert(cycles)
+      .values({
+        projectId: project.id,
+        workspaceId: workspace.id,
+        name: body.name,
+        description: body.description ?? null,
+        startDate,
+        endDate,
+        ownedById: body.owned_by_id || user.id,
+        sortOrder,
+      })
+      .returning();
+
+    const emptyStats = { total: 0, completed: 0, cancelled: 0, started: 0, unstarted: 0, backlog: 0 };
+    return c.json(formatCycle(created, emptyStats, false, []), 201);
+  }
+);
+
+// GET /:projectId/cycles/:cycleId/ - Retrieve single cycle
+projectRoutes.get("/:projectId/cycles/:cycleId/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const cycleId = c.req.param("cycleId");
+
+  // Don't match sub-routes
+  if (cycleId === "date-check") return c.notFound();
+
+  const cycle = await db.query.cycles.findFirst({
+    where: and(eq(cycles.id, cycleId), eq(cycles.projectId, project.id), isNull(cycles.archivedAt)),
+  });
+  if (!cycle) return c.json({ error: "Cycle not found" }, 404);
+
+  const [statsMap, assigneeMap, favSet] = await Promise.all([
+    getCycleIssueStats([cycleId]),
+    getCycleAssigneeIds([cycleId]),
+    getUserFavoriteCycleIds([cycleId], user.id),
+  ]);
+
+  // Count sub-issues (issues with parent that are in this cycle)
+  const subIssuesResult = await db
+    .select({ count: countFn() })
+    .from(cycleIssues)
+    .innerJoin(issues, eq(cycleIssues.issueId, issues.id))
+    .where(
+      and(
+        eq(cycleIssues.cycleId, cycleId),
+        isNotNull(issues.parentId),
+        isNull(issues.archivedAt),
+        isNull(issues.deletedAt)
+      )
+    );
+  const subIssues = Number(subIssuesResult[0]?.count ?? 0);
+
+  const stats = statsMap.get(cycleId) || { total: 0, completed: 0, cancelled: 0, started: 0, unstarted: 0, backlog: 0 };
+
+  return c.json(formatCycle(cycle, stats, favSet.has(cycleId), assigneeMap.get(cycleId) || [], { sub_issues: subIssues }));
+});
+
+// PATCH /:projectId/cycles/:cycleId/ - Update cycle
+const updateCycleSchema = z.object({
+  name: z.string().min(1).optional(),
+  description: z.string().optional(),
+  start_date: z.string().nullable().optional(),
+  end_date: z.string().nullable().optional(),
+  owned_by_id: z.string().nullable().optional(),
+  sort_order: z.number().optional(),
+});
+
+projectRoutes.patch(
+  "/:projectId/cycles/:cycleId/",
+  zValidator("json", updateCycleSchema),
+  async (c) => {
+    const project = c.get("project");
+    const workspace = c.get("workspace");
+    const user = c.get("user");
+    if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+    const cycleId = c.req.param("cycleId");
+
+    const cycle = await db.query.cycles.findFirst({
+      where: and(eq(cycles.id, cycleId), eq(cycles.projectId, project.id)),
+    });
+    if (!cycle) return c.json({ error: "Cycle not found" }, 404);
+
+    if (cycle.archivedAt) {
+      return c.json({ error: "Archived cycle cannot be updated" }, 400);
+    }
+
+    const body = c.req.valid("json");
+
+    // Completed cycle protection: only sort_order can be changed
+    if (cycle.endDate && cycle.endDate < new Date()) {
+      if (body.sort_order !== undefined) {
+        await db.update(cycles).set({ sortOrder: body.sort_order, updatedAt: new Date() }).where(eq(cycles.id, cycleId));
+      } else {
+        return c.json({ error: "The Cycle has already been completed so it cannot be edited" }, 400);
+      }
+    } else {
+      // Normal update
+      const updateData: Record<string, any> = { updatedAt: new Date() };
+
+      if (body.name !== undefined) updateData.name = body.name;
+      if (body.description !== undefined) updateData.description = body.description;
+      if (body.owned_by_id !== undefined) updateData.ownedById = body.owned_by_id;
+      if (body.sort_order !== undefined) updateData.sortOrder = body.sort_order;
+
+      // Handle dates
+      if (body.start_date !== undefined || body.end_date !== undefined) {
+        const newStartStr = body.start_date !== undefined ? body.start_date : (cycle.startDate?.toISOString() ?? null);
+        const newEndStr = body.end_date !== undefined ? body.end_date : (cycle.endDate?.toISOString() ?? null);
+        const hasStart = newStartStr !== null && newStartStr !== "";
+        const hasEnd = newEndStr !== null && newEndStr !== "";
+
+        if (hasStart !== hasEnd) {
+          return c.json({ error: "Both start date and end date are either required or are to be null" }, 400);
+        }
+
+        if (hasStart && hasEnd) {
+          const sd = new Date(newStartStr!);
+          const ed = new Date(newEndStr!);
+          if (sd > ed) {
+            return c.json({ error: "Start date cannot exceed end date" }, 400);
+          }
+          updateData.startDate = sd;
+          updateData.endDate = ed;
+        } else {
+          updateData.startDate = null;
+          updateData.endDate = null;
+        }
+      }
+
+      await db.update(cycles).set(updateData).where(eq(cycles.id, cycleId));
+    }
+
+    // Re-fetch and return
+    const updated = await db.query.cycles.findFirst({ where: eq(cycles.id, cycleId) });
+    const [statsMap, assigneeMap, favSet] = await Promise.all([
+      getCycleIssueStats([cycleId]),
+      getCycleAssigneeIds([cycleId]),
+      getUserFavoriteCycleIds([cycleId], user.id),
+    ]);
+    const stats = statsMap.get(cycleId) || { total: 0, completed: 0, cancelled: 0, started: 0, unstarted: 0, backlog: 0 };
+
+    return c.json(formatCycle(updated!, stats, favSet.has(cycleId), assigneeMap.get(cycleId) || []));
+  }
+);
+
+// DELETE /:projectId/cycles/:cycleId/ - Delete cycle
+projectRoutes.delete("/:projectId/cycles/:cycleId/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const cycleId = c.req.param("cycleId");
+
+  const cycle = await db.query.cycles.findFirst({
+    where: and(eq(cycles.id, cycleId), eq(cycles.projectId, project.id)),
+  });
+  if (!cycle) return c.json({ error: "Cycle not found" }, 404);
+
+  // Delete the cycle (cascade will remove cycle_issues)
+  await db.delete(cycles).where(eq(cycles.id, cycleId));
+
+  // Clean up favorites
+  await db.delete(cycleFavorites).where(eq(cycleFavorites.cycleId, cycleId));
+
+  // Clean up recent visits
+  await db.delete(recentVisits).where(
+    and(eq(recentVisits.entityType, "cycle"), eq(recentVisits.entityId, cycleId))
+  );
+
+  return c.body(null, 204);
+});
+
+// =====================================================
+// 4.7.1 Cycle Date Check
+// =====================================================
+
+// POST /:projectId/cycles/date-check/ - Check for overlapping dates
+projectRoutes.post(
+  "/:projectId/cycles/date-check/",
+  zValidator("json", z.object({
+    start_date: z.string(),
+    end_date: z.string(),
+    cycle_id: z.string().optional(),
+  })),
+  async (c) => {
+    const project = c.get("project");
+    const workspace = c.get("workspace");
+    const user = c.get("user");
+    if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+    const body = c.req.valid("json");
+    const startDate = new Date(body.start_date);
+    const endDate = new Date(body.end_date);
+
+    // Check for overlapping cycles:
+    // existing.start <= new.end AND existing.end >= new.start
+    let conditions = [
+      eq(cycles.projectId, project.id),
+      lte(cycles.startDate, endDate),
+      gte(cycles.endDate, startDate),
+    ];
+
+    // Build query
+    let overlapping;
+    if (body.cycle_id) {
+      overlapping = await db
+        .select({ id: cycles.id })
+        .from(cycles)
+        .where(and(...conditions, ne(cycles.id, body.cycle_id)))
+        .limit(1);
+    } else {
+      overlapping = await db
+        .select({ id: cycles.id })
+        .from(cycles)
+        .where(and(...conditions))
+        .limit(1);
+    }
+
+    if (overlapping.length > 0) {
+      return c.json({
+        error: "You have a cycle already on the given dates, if you want to create a draft cycle you can do that by removing dates",
+        status: false,
+      });
+    }
+
+    return c.json({ status: true });
+  }
+);
+
+// =====================================================
+// 4.7.2 Cycle Favorites
+// =====================================================
+
+// POST /:projectId/user-favorite-cycles/ - Add cycle to favorites
+projectRoutes.post(
+  "/:projectId/user-favorite-cycles/",
+  zValidator("json", z.object({ cycle: z.string() })),
+  async (c) => {
+    const project = c.get("project");
+    const workspace = c.get("workspace");
+    const user = c.get("user");
+    if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+    const body = c.req.valid("json");
+
+    await db.insert(cycleFavorites).values({
+      cycleId: body.cycle,
+      userId: user.id,
+    });
+
+    return c.body(null, 204);
+  }
+);
+
+// DELETE /:projectId/user-favorite-cycles/:cycleId/ - Remove from favorites
+projectRoutes.delete("/:projectId/user-favorite-cycles/:cycleId/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const cycleId = c.req.param("cycleId");
+
+  await db.delete(cycleFavorites).where(
+    and(eq(cycleFavorites.cycleId, cycleId), eq(cycleFavorites.userId, user.id))
+  );
+
+  return c.body(null, 204);
+});
+
+// =====================================================
+// 4.7.3 Cycle Archive / Unarchive
+// =====================================================
+
+// GET /:projectId/archived-cycles/ - List archived cycles
+projectRoutes.get("/:projectId/archived-cycles/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const allCycles = await db
+    .select()
+    .from(cycles)
+    .where(and(eq(cycles.projectId, project.id), isNotNull(cycles.archivedAt)))
+    .orderBy(desc(cycles.createdAt));
+
+  if (allCycles.length === 0) return c.json([]);
+
+  const cycleIdList = allCycles.map((cy) => cy.id);
+
+  const [statsMap, assigneeMap, favSet] = await Promise.all([
+    getCycleIssueStats(cycleIdList),
+    getCycleAssigneeIds(cycleIdList),
+    getUserFavoriteCycleIds(cycleIdList, user.id),
+  ]);
+
+  const result = allCycles.map((cy) => {
+    const stats = statsMap.get(cy.id) || { total: 0, completed: 0, cancelled: 0, started: 0, unstarted: 0, backlog: 0 };
+    return formatCycle(cy, stats, favSet.has(cy.id), assigneeMap.get(cy.id) || []);
+  });
+
+  result.sort((a, b) => {
+    if (a.is_favorite !== b.is_favorite) return a.is_favorite ? -1 : 1;
+    return 0;
+  });
+
+  return c.json(result);
+});
+
+// GET /:projectId/archived-cycles/:cycleId/ - Get archived cycle detail
+projectRoutes.get("/:projectId/archived-cycles/:cycleId/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const cycleId = c.req.param("cycleId");
+
+  const cycle = await db.query.cycles.findFirst({
+    where: and(eq(cycles.id, cycleId), eq(cycles.projectId, project.id), isNotNull(cycles.archivedAt)),
+  });
+  if (!cycle) return c.json({ error: "Cycle not found" }, 404);
+
+  const [statsMap, assigneeMap, favSet] = await Promise.all([
+    getCycleIssueStats([cycleId]),
+    getCycleAssigneeIds([cycleId]),
+    getUserFavoriteCycleIds([cycleId], user.id),
+  ]);
+
+  const subIssuesResult = await db
+    .select({ count: countFn() })
+    .from(cycleIssues)
+    .innerJoin(issues, eq(cycleIssues.issueId, issues.id))
+    .where(
+      and(
+        eq(cycleIssues.cycleId, cycleId),
+        isNotNull(issues.parentId),
+        isNull(issues.archivedAt),
+        isNull(issues.deletedAt)
+      )
+    );
+  const subIssues = Number(subIssuesResult[0]?.count ?? 0);
+
+  const stats = statsMap.get(cycleId) || { total: 0, completed: 0, cancelled: 0, started: 0, unstarted: 0, backlog: 0 };
+
+  return c.json(formatCycle(cycle, stats, favSet.has(cycleId), assigneeMap.get(cycleId) || [], { sub_issues: subIssues }));
+});
+
+// POST /:projectId/cycles/:cycleId/archive/ - Archive a completed cycle
+projectRoutes.post("/:projectId/cycles/:cycleId/archive/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const cycleId = c.req.param("cycleId");
+
+  const cycle = await db.query.cycles.findFirst({
+    where: and(eq(cycles.id, cycleId), eq(cycles.projectId, project.id)),
+  });
+  if (!cycle) return c.json({ error: "Cycle not found" }, 404);
+
+  // Only completed cycles can be archived
+  if (!cycle.endDate || cycle.endDate >= new Date()) {
+    return c.json({ error: "Only completed cycles can be archived" }, 400);
+  }
+
+  const now = new Date();
+  await db.update(cycles).set({ archivedAt: now }).where(eq(cycles.id, cycleId));
+
+  // Remove favorites for this cycle
+  await db.delete(cycleFavorites).where(eq(cycleFavorites.cycleId, cycleId));
+
+  return c.json({ archived_at: now.toISOString() });
+});
+
+// DELETE /:projectId/cycles/:cycleId/archive/ - Unarchive cycle (frontend uses this path)
+projectRoutes.delete("/:projectId/cycles/:cycleId/archive/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const cycleId = c.req.param("cycleId");
+
+  const cycle = await db.query.cycles.findFirst({
+    where: and(eq(cycles.id, cycleId), eq(cycles.projectId, project.id)),
+  });
+  if (!cycle) return c.json({ error: "Cycle not found" }, 404);
+
+  await db.update(cycles).set({ archivedAt: null }).where(eq(cycles.id, cycleId));
+
+  return c.body(null, 204);
+});
+
+// =====================================================
+// 4.7.4 Transfer Cycle Issues
+// =====================================================
+
+// POST /:projectId/cycles/:cycleId/transfer-issues/ - Transfer incomplete issues
+projectRoutes.post(
+  "/:projectId/cycles/:cycleId/transfer-issues/",
+  zValidator("json", z.object({ new_cycle_id: z.string() })),
+  async (c) => {
+    const project = c.get("project");
+    const workspace = c.get("workspace");
+    const user = c.get("user");
+    if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+    const cycleId = c.req.param("cycleId");
+    const body = c.req.valid("json");
+
+    // Source cycle must be completed
+    const sourceCycle = await db.query.cycles.findFirst({
+      where: and(eq(cycles.id, cycleId), eq(cycles.projectId, project.id)),
+    });
+    if (!sourceCycle) return c.json({ error: "Cycle not found" }, 404);
+
+    if (!sourceCycle.endDate || sourceCycle.endDate >= new Date()) {
+      return c.json({ error: "Only completed cycles can transfer issues" }, 400);
+    }
+
+    // Destination cycle must not be completed
+    const destCycle = await db.query.cycles.findFirst({
+      where: and(eq(cycles.id, body.new_cycle_id), eq(cycles.projectId, project.id)),
+    });
+    if (!destCycle) return c.json({ error: "New cycle not found" }, 404);
+
+    if (destCycle.endDate && destCycle.endDate < new Date()) {
+      return c.json({ error: "Cannot transfer issues to a completed cycle" }, 400);
+    }
+
+    // Get all issues in source cycle with their state groups
+    const sourceIssueRows = await db
+      .select({
+        cycleIssueId: cycleIssues.id,
+        issueId: cycleIssues.issueId,
+        stateGroup: states.group,
+      })
+      .from(cycleIssues)
+      .innerJoin(issues, eq(cycleIssues.issueId, issues.id))
+      .innerJoin(states, eq(issues.stateId, states.id))
+      .where(
+        and(
+          eq(cycleIssues.cycleId, cycleId),
+          isNull(issues.archivedAt),
+          isNull(issues.deletedAt)
+        )
+      );
+
+    // Build progress snapshot for source cycle
+    const snapshot: Record<string, number> = {
+      total_issues: sourceIssueRows.length,
+      completed_issues: 0,
+      cancelled_issues: 0,
+      started_issues: 0,
+      unstarted_issues: 0,
+      backlog_issues: 0,
+    };
+    for (const row of sourceIssueRows) {
+      switch (row.stateGroup) {
+        case "completed": snapshot.completed_issues++; break;
+        case "cancelled": snapshot.cancelled_issues++; break;
+        case "started": snapshot.started_issues++; break;
+        case "unstarted": snapshot.unstarted_issues++; break;
+        case "backlog": snapshot.backlog_issues++; break;
+      }
+    }
+
+    // Save progress snapshot on source cycle
+    await db.update(cycles).set({ progressSnapshot: snapshot }).where(eq(cycles.id, cycleId));
+
+    // Transfer incomplete issues (backlog, unstarted, started) to destination
+    const incompleteIssues = sourceIssueRows.filter(
+      (r) => r.stateGroup === "backlog" || r.stateGroup === "unstarted" || r.stateGroup === "started"
+    );
+
+    if (incompleteIssues.length > 0) {
+      const incompleteIssueIds = incompleteIssues.map((r) => r.issueId);
+      const incompleteCycleIssueIds = incompleteIssues.map((r) => r.cycleIssueId);
+
+      // Remove from source cycle
+      await db.delete(cycleIssues).where(inArray(cycleIssues.id, incompleteCycleIssueIds));
+
+      // Check which issues are already in destination cycle
+      const existingInDest = await db
+        .select({ issueId: cycleIssues.issueId })
+        .from(cycleIssues)
+        .where(
+          and(
+            eq(cycleIssues.cycleId, body.new_cycle_id),
+            inArray(cycleIssues.issueId, incompleteIssueIds)
+          )
+        );
+      const existingSet = new Set(existingInDest.map((r) => r.issueId));
+
+      // Insert only new ones
+      const toInsert = incompleteIssueIds
+        .filter((id) => !existingSet.has(id))
+        .map((issueId) => ({ cycleId: body.new_cycle_id, issueId }));
+
+      if (toInsert.length > 0) {
+        await db.insert(cycleIssues).values(toInsert);
+      }
+    }
+
+    return c.json({ message: "Success" });
+  }
+);
+
+// =====================================================
+// 4.7.5 Cycle User Properties
 // =====================================================
 
 const updateCycleUserPropertiesSchema = z.object({
@@ -1802,7 +2549,857 @@ projectRoutes.patch(
 );
 
 // =====================================================
-// 4.8 Module User Properties
+// 4.8 Project Modules
+// =====================================================
+
+// GET /:projectId/modules/ - List non-archived modules for project
+projectRoutes.get("/:projectId/modules/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  // Fetch all non-archived modules for this project
+  const allModules = await db
+    .select()
+    .from(modules)
+    .where(and(eq(modules.projectId, project.id), isNull(modules.archivedAt)))
+    .orderBy(desc(modules.createdAt));
+
+  if (allModules.length === 0) {
+    return c.json([]);
+  }
+
+  const moduleIds = allModules.map((m) => m.id);
+
+  // Fetch members for all modules
+  const allMembers = await db
+    .select({ moduleId: moduleMembers.moduleId, memberId: moduleMembers.memberId })
+    .from(moduleMembers)
+    .where(inArray(moduleMembers.moduleId, moduleIds));
+
+  const membersByModule = new Map<string, string[]>();
+  for (const mm of allMembers) {
+    const existing = membersByModule.get(mm.moduleId) || [];
+    existing.push(mm.memberId);
+    membersByModule.set(mm.moduleId, existing);
+  }
+
+  // Fetch favorites for current user
+  const userFavorites = await db
+    .select({ moduleId: moduleFavorites.moduleId })
+    .from(moduleFavorites)
+    .where(and(inArray(moduleFavorites.moduleId, moduleIds), eq(moduleFavorites.userId, user.id)));
+
+  const favModuleIds = new Set(userFavorites.map((f) => f.moduleId));
+
+  // Compute issue statistics per module by joining module_issues -> issues -> states
+  const issueStats = await db
+    .select({
+      moduleId: moduleIssues.moduleId,
+      stateGroup: states.group,
+      issueCount: countFn(),
+    })
+    .from(moduleIssues)
+    .innerJoin(issues, eq(moduleIssues.issueId, issues.id))
+    .innerJoin(states, eq(issues.stateId, states.id))
+    .where(
+      and(
+        inArray(moduleIssues.moduleId, moduleIds),
+        isNull(issues.archivedAt),
+        isNull(issues.deletedAt)
+      )
+    )
+    .groupBy(moduleIssues.moduleId, states.group);
+
+  const statsMap = new Map<
+    string,
+    { total: number; completed: number; cancelled: number; started: number; unstarted: number; backlog: number }
+  >();
+
+  for (const row of issueStats) {
+    const existing = statsMap.get(row.moduleId) || {
+      total: 0,
+      completed: 0,
+      cancelled: 0,
+      started: 0,
+      unstarted: 0,
+      backlog: 0,
+    };
+    const cnt = Number(row.issueCount);
+    existing.total += cnt;
+    switch (row.stateGroup) {
+      case "completed":
+        existing.completed += cnt;
+        break;
+      case "cancelled":
+        existing.cancelled += cnt;
+        break;
+      case "started":
+        existing.started += cnt;
+        break;
+      case "unstarted":
+        existing.unstarted += cnt;
+        break;
+      case "backlog":
+        existing.backlog += cnt;
+        break;
+    }
+    statsMap.set(row.moduleId, existing);
+  }
+
+  // Format response matching Django's ModuleSerializer
+  const result = allModules.map((m) => {
+    const stats = statsMap.get(m.id) || {
+      total: 0,
+      completed: 0,
+      cancelled: 0,
+      started: 0,
+      unstarted: 0,
+      backlog: 0,
+    };
+
+    return {
+      id: m.id,
+      workspace_id: m.workspaceId,
+      project_id: m.projectId,
+      name: m.name,
+      description: m.description ?? "",
+      description_text: m.descriptionText ?? null,
+      description_html: m.descriptionHtml ?? null,
+      start_date: m.startDate?.toISOString().split("T")[0] ?? null,
+      target_date: m.targetDate?.toISOString().split("T")[0] ?? null,
+      status: m.status ?? "backlog",
+      lead_id: m.leadId ?? null,
+      member_ids: membersByModule.get(m.id) || [],
+      view_props: m.viewProps ?? {},
+      sort_order: m.sortOrder ?? 65535,
+      is_favorite: favModuleIds.has(m.id),
+      total_issues: stats.total,
+      completed_issues: stats.completed,
+      cancelled_issues: stats.cancelled,
+      started_issues: stats.started,
+      unstarted_issues: stats.unstarted,
+      backlog_issues: stats.backlog,
+      created_at: m.createdAt?.toISOString() ?? null,
+      updated_at: m.updatedAt?.toISOString() ?? null,
+      archived_at: m.archivedAt?.toISOString() ?? null,
+    };
+  });
+
+  // Sort: favorites first, then by created_at descending (already ordered by created_at from query)
+  result.sort((a, b) => {
+    if (a.is_favorite !== b.is_favorite) return a.is_favorite ? -1 : 1;
+    return 0; // preserve created_at desc from query
+  });
+
+  return c.json(result);
+});
+
+// POST /:projectId/modules/ - Create module
+const createModuleSchema = z.object({
+  name: z.string().min(1),
+  description: z.string().optional(),
+  description_text: z.string().nullable().optional(),
+  description_html: z.string().nullable().optional(),
+  start_date: z.string().nullable().optional(),
+  target_date: z.string().nullable().optional(),
+  status: z.enum(["backlog", "planned", "in-progress", "paused", "completed", "cancelled"]).optional(),
+  lead_id: z.string().nullable().optional(),
+  member_ids: z.array(z.string()).optional(),
+  sort_order: z.number().optional(),
+});
+
+projectRoutes.post(
+  "/:projectId/modules/",
+  zValidator("json", createModuleSchema),
+  async (c) => {
+    const project = c.get("project");
+    const workspace = c.get("workspace");
+    const user = c.get("user");
+    if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+    const body = c.req.valid("json");
+
+    let startDate: Date | null = null;
+    let targetDate: Date | null = null;
+    if (body.start_date) startDate = new Date(body.start_date);
+    if (body.target_date) targetDate = new Date(body.target_date);
+
+    // Auto sort_order
+    let sortOrder = body.sort_order;
+    if (sortOrder === undefined) {
+      const maxResult = await db.select({ largest: max(modules.sortOrder) }).from(modules).where(eq(modules.projectId, project.id));
+      sortOrder = maxResult[0]?.largest != null ? maxResult[0].largest + 10000 : 65535;
+    }
+
+    const [created] = await db
+      .insert(modules)
+      .values({
+        projectId: project.id,
+        workspaceId: workspace.id,
+        name: body.name,
+        description: body.description ?? null,
+        descriptionText: body.description_text ?? null,
+        descriptionHtml: body.description_html ?? null,
+        startDate,
+        targetDate,
+        status: body.status ?? "backlog",
+        leadId: body.lead_id ?? null,
+        sortOrder,
+        createdById: user.id,
+      })
+      .returning();
+
+    // Add members if provided
+    const memberIds = body.member_ids ?? [];
+    if (memberIds.length > 0) {
+      await db.insert(moduleMembers).values(
+        memberIds.map((memberId) => ({ moduleId: created.id, memberId }))
+      );
+    }
+
+    return c.json({
+      id: created.id,
+      workspace_id: created.workspaceId,
+      project_id: created.projectId,
+      name: created.name,
+      description: created.description ?? "",
+      description_text: created.descriptionText ?? null,
+      description_html: created.descriptionHtml ?? null,
+      start_date: created.startDate?.toISOString().split("T")[0] ?? null,
+      target_date: created.targetDate?.toISOString().split("T")[0] ?? null,
+      status: created.status ?? "backlog",
+      lead_id: created.leadId ?? null,
+      member_ids: memberIds,
+      view_props: created.viewProps ?? {},
+      sort_order: created.sortOrder ?? 65535,
+      is_favorite: false,
+      total_issues: 0,
+      completed_issues: 0,
+      cancelled_issues: 0,
+      started_issues: 0,
+      unstarted_issues: 0,
+      backlog_issues: 0,
+      created_at: created.createdAt?.toISOString() ?? null,
+      updated_at: created.updatedAt?.toISOString() ?? null,
+      archived_at: null,
+    }, 201);
+  }
+);
+
+// GET /:projectId/modules/:moduleId/ - Retrieve single module
+projectRoutes.get("/:projectId/modules/:moduleId/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const moduleId = c.req.param("moduleId");
+
+  const mod = await db.query.modules.findFirst({
+    where: and(eq(modules.id, moduleId), eq(modules.projectId, project.id), isNull(modules.archivedAt)),
+  });
+  if (!mod) return c.json({ error: "Module not found" }, 404);
+
+  // Members
+  const members = await db
+    .select({ memberId: moduleMembers.memberId })
+    .from(moduleMembers)
+    .where(eq(moduleMembers.moduleId, moduleId));
+
+  // Favorite
+  const fav = await db.query.moduleFavorites.findFirst({
+    where: and(eq(moduleFavorites.moduleId, moduleId), eq(moduleFavorites.userId, user.id)),
+  });
+
+  // Issue stats
+  const issueStatRows = await db
+    .select({ stateGroup: states.group, issueCount: countFn() })
+    .from(moduleIssues)
+    .innerJoin(issues, eq(moduleIssues.issueId, issues.id))
+    .innerJoin(states, eq(issues.stateId, states.id))
+    .where(and(eq(moduleIssues.moduleId, moduleId), isNull(issues.archivedAt), isNull(issues.deletedAt)))
+    .groupBy(states.group);
+
+  const stats = { total: 0, completed: 0, cancelled: 0, started: 0, unstarted: 0, backlog: 0 };
+  for (const row of issueStatRows) {
+    const cnt = Number(row.issueCount);
+    stats.total += cnt;
+    switch (row.stateGroup) {
+      case "completed": stats.completed += cnt; break;
+      case "cancelled": stats.cancelled += cnt; break;
+      case "started": stats.started += cnt; break;
+      case "unstarted": stats.unstarted += cnt; break;
+      case "backlog": stats.backlog += cnt; break;
+    }
+  }
+
+  // Sub-issues count
+  const subIssuesResult = await db
+    .select({ count: countFn() })
+    .from(moduleIssues)
+    .innerJoin(issues, eq(moduleIssues.issueId, issues.id))
+    .where(
+      and(
+        eq(moduleIssues.moduleId, moduleId),
+        isNotNull(issues.parentId),
+        isNull(issues.archivedAt),
+        isNull(issues.deletedAt)
+      )
+    );
+  const subIssues = Number(subIssuesResult[0]?.count ?? 0);
+
+  // Links
+  const links = await db.select().from(moduleLinks).where(eq(moduleLinks.moduleId, moduleId));
+
+  return c.json({
+    id: mod.id,
+    workspace_id: mod.workspaceId,
+    project_id: mod.projectId,
+    name: mod.name,
+    description: mod.description ?? "",
+    description_text: mod.descriptionText ?? null,
+    description_html: mod.descriptionHtml ?? null,
+    start_date: mod.startDate?.toISOString().split("T")[0] ?? null,
+    target_date: mod.targetDate?.toISOString().split("T")[0] ?? null,
+    status: mod.status ?? "backlog",
+    lead_id: mod.leadId ?? null,
+    member_ids: members.map((m) => m.memberId),
+    view_props: mod.viewProps ?? {},
+    sort_order: mod.sortOrder ?? 65535,
+    is_favorite: !!fav,
+    total_issues: stats.total,
+    completed_issues: stats.completed,
+    cancelled_issues: stats.cancelled,
+    started_issues: stats.started,
+    unstarted_issues: stats.unstarted,
+    backlog_issues: stats.backlog,
+    sub_issues: subIssues,
+    link_module: links.map((l) => ({
+      id: l.id,
+      module: l.moduleId,
+      title: l.title ?? "",
+      url: l.url,
+      metadata: l.metadata ?? {},
+      created_by: l.createdById ?? null,
+      created_at: l.createdAt?.toISOString() ?? null,
+    })),
+    created_at: mod.createdAt?.toISOString() ?? null,
+    updated_at: mod.updatedAt?.toISOString() ?? null,
+    archived_at: mod.archivedAt?.toISOString() ?? null,
+  });
+});
+
+// PATCH /:projectId/modules/:moduleId/ - Update module
+const updateModuleSchema = z.object({
+  name: z.string().min(1).optional(),
+  description: z.string().optional(),
+  description_text: z.string().nullable().optional(),
+  description_html: z.string().nullable().optional(),
+  start_date: z.string().nullable().optional(),
+  target_date: z.string().nullable().optional(),
+  status: z.enum(["backlog", "planned", "in-progress", "paused", "completed", "cancelled"]).optional(),
+  lead_id: z.string().nullable().optional(),
+  member_ids: z.array(z.string()).optional(),
+  sort_order: z.number().optional(),
+});
+
+projectRoutes.patch(
+  "/:projectId/modules/:moduleId/",
+  zValidator("json", updateModuleSchema),
+  async (c) => {
+    const project = c.get("project");
+    const workspace = c.get("workspace");
+    const user = c.get("user");
+    if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+    const moduleId = c.req.param("moduleId");
+
+    const mod = await db.query.modules.findFirst({
+      where: and(eq(modules.id, moduleId), eq(modules.projectId, project.id)),
+    });
+    if (!mod) return c.json({ error: "Module not found" }, 404);
+
+    if (mod.archivedAt) {
+      return c.json({ error: "Archived module cannot be updated" }, 400);
+    }
+
+    const body = c.req.valid("json");
+    const updateData: Record<string, any> = { updatedAt: new Date() };
+
+    if (body.name !== undefined) updateData.name = body.name;
+    if (body.description !== undefined) updateData.description = body.description;
+    if (body.description_text !== undefined) updateData.descriptionText = body.description_text;
+    if (body.description_html !== undefined) updateData.descriptionHtml = body.description_html;
+    if (body.status !== undefined) updateData.status = body.status;
+    if (body.lead_id !== undefined) updateData.leadId = body.lead_id;
+    if (body.sort_order !== undefined) updateData.sortOrder = body.sort_order;
+
+    if (body.start_date !== undefined) {
+      updateData.startDate = body.start_date ? new Date(body.start_date) : null;
+    }
+    if (body.target_date !== undefined) {
+      updateData.targetDate = body.target_date ? new Date(body.target_date) : null;
+    }
+
+    await db.update(modules).set(updateData).where(eq(modules.id, moduleId));
+
+    // Handle member updates
+    if (body.member_ids !== undefined) {
+      await db.delete(moduleMembers).where(eq(moduleMembers.moduleId, moduleId));
+      if (body.member_ids.length > 0) {
+        await db.insert(moduleMembers).values(
+          body.member_ids.map((memberId) => ({ moduleId, memberId }))
+        );
+      }
+    }
+
+    // Re-fetch and return
+    const updated = await db.query.modules.findFirst({ where: eq(modules.id, moduleId) });
+    const members = await db
+      .select({ memberId: moduleMembers.memberId })
+      .from(moduleMembers)
+      .where(eq(moduleMembers.moduleId, moduleId));
+
+    return c.json({
+      id: updated!.id,
+      workspace_id: updated!.workspaceId,
+      project_id: updated!.projectId,
+      name: updated!.name,
+      description: updated!.description ?? "",
+      description_text: updated!.descriptionText ?? null,
+      description_html: updated!.descriptionHtml ?? null,
+      start_date: updated!.startDate?.toISOString().split("T")[0] ?? null,
+      target_date: updated!.targetDate?.toISOString().split("T")[0] ?? null,
+      status: updated!.status ?? "backlog",
+      lead_id: updated!.leadId ?? null,
+      member_ids: members.map((m) => m.memberId),
+      view_props: updated!.viewProps ?? {},
+      sort_order: updated!.sortOrder ?? 65535,
+      created_at: updated!.createdAt?.toISOString() ?? null,
+      updated_at: updated!.updatedAt?.toISOString() ?? null,
+      archived_at: updated!.archivedAt?.toISOString() ?? null,
+    });
+  }
+);
+
+// DELETE /:projectId/modules/:moduleId/ - Delete module
+projectRoutes.delete("/:projectId/modules/:moduleId/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const moduleId = c.req.param("moduleId");
+
+  const mod = await db.query.modules.findFirst({
+    where: and(eq(modules.id, moduleId), eq(modules.projectId, project.id)),
+  });
+  if (!mod) return c.json({ error: "Module not found" }, 404);
+
+  await db.delete(modules).where(eq(modules.id, moduleId));
+
+  // Clean up favorites
+  await db.delete(moduleFavorites).where(eq(moduleFavorites.moduleId, moduleId));
+
+  // Clean up recent visits
+  await db.delete(recentVisits).where(
+    and(eq(recentVisits.entityType, "module"), eq(recentVisits.entityId, moduleId))
+  );
+
+  return c.body(null, 204);
+});
+
+// =====================================================
+// 4.8.1 Module Links
+// =====================================================
+
+// POST /:projectId/modules/:moduleId/module-links/ - Create link
+projectRoutes.post(
+  "/:projectId/modules/:moduleId/module-links/",
+  zValidator("json", z.object({
+    title: z.string().optional(),
+    url: z.string().url(),
+    metadata: z.record(z.string(), z.any()).optional(),
+  })),
+  async (c) => {
+    const project = c.get("project");
+    const workspace = c.get("workspace");
+    const user = c.get("user");
+    if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+    const moduleId = c.req.param("moduleId");
+
+    const mod = await db.query.modules.findFirst({
+      where: and(eq(modules.id, moduleId), eq(modules.projectId, project.id)),
+    });
+    if (!mod) return c.json({ error: "Module not found" }, 404);
+
+    const body = c.req.valid("json");
+
+    const [link] = await db.insert(moduleLinks).values({
+      moduleId,
+      title: body.title ?? null,
+      url: body.url,
+      metadata: body.metadata ?? null,
+      createdById: user.id,
+    }).returning();
+
+    return c.json({
+      id: link.id,
+      module: link.moduleId,
+      title: link.title ?? "",
+      url: link.url,
+      metadata: link.metadata ?? {},
+      created_by: link.createdById ?? null,
+      created_at: link.createdAt?.toISOString() ?? null,
+    }, 201);
+  }
+);
+
+// PATCH /:projectId/modules/:moduleId/module-links/:linkId/ - Update link
+projectRoutes.patch(
+  "/:projectId/modules/:moduleId/module-links/:linkId/",
+  zValidator("json", z.object({
+    title: z.string().optional(),
+    url: z.string().url().optional(),
+    metadata: z.record(z.string(), z.any()).optional(),
+  })),
+  async (c) => {
+    const project = c.get("project");
+    const workspace = c.get("workspace");
+    const user = c.get("user");
+    if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+    const moduleId = c.req.param("moduleId");
+    const linkId = c.req.param("linkId");
+
+    const link = await db.query.moduleLinks.findFirst({
+      where: and(eq(moduleLinks.id, linkId), eq(moduleLinks.moduleId, moduleId)),
+    });
+    if (!link) return c.json({ error: "Link not found" }, 404);
+
+    const body = c.req.valid("json");
+    const updateData: Record<string, any> = {};
+
+    if (body.title !== undefined) updateData.title = body.title;
+    if (body.url !== undefined) updateData.url = body.url;
+    if (body.metadata !== undefined) updateData.metadata = body.metadata;
+
+    await db.update(moduleLinks).set(updateData).where(eq(moduleLinks.id, linkId));
+
+    const updated = await db.query.moduleLinks.findFirst({ where: eq(moduleLinks.id, linkId) });
+
+    return c.json({
+      id: updated!.id,
+      module: updated!.moduleId,
+      title: updated!.title ?? "",
+      url: updated!.url,
+      metadata: updated!.metadata ?? {},
+      created_by: updated!.createdById ?? null,
+      created_at: updated!.createdAt?.toISOString() ?? null,
+    });
+  }
+);
+
+// DELETE /:projectId/modules/:moduleId/module-links/:linkId/ - Delete link
+projectRoutes.delete("/:projectId/modules/:moduleId/module-links/:linkId/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const moduleId = c.req.param("moduleId");
+  const linkId = c.req.param("linkId");
+
+  const link = await db.query.moduleLinks.findFirst({
+    where: and(eq(moduleLinks.id, linkId), eq(moduleLinks.moduleId, moduleId)),
+  });
+  if (!link) return c.json({ error: "Link not found" }, 404);
+
+  await db.delete(moduleLinks).where(eq(moduleLinks.id, linkId));
+
+  return c.body(null, 204);
+});
+
+// =====================================================
+// 4.8.2 Module Favorites
+// =====================================================
+
+// POST /:projectId/user-favorite-modules/ - Add module to favorites
+projectRoutes.post(
+  "/:projectId/user-favorite-modules/",
+  zValidator("json", z.object({ module: z.string() })),
+  async (c) => {
+    const project = c.get("project");
+    const workspace = c.get("workspace");
+    const user = c.get("user");
+    if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+    const body = c.req.valid("json");
+
+    await db.insert(moduleFavorites).values({
+      moduleId: body.module,
+      userId: user.id,
+    });
+
+    return c.body(null, 204);
+  }
+);
+
+// DELETE /:projectId/user-favorite-modules/:moduleId/ - Remove from favorites
+projectRoutes.delete("/:projectId/user-favorite-modules/:moduleId/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const moduleId = c.req.param("moduleId");
+
+  await db.delete(moduleFavorites).where(
+    and(eq(moduleFavorites.moduleId, moduleId), eq(moduleFavorites.userId, user.id))
+  );
+
+  return c.body(null, 204);
+});
+
+// =====================================================
+// 4.8.3 Module Archive / Unarchive
+// =====================================================
+
+// GET /:projectId/archived-modules/ - List archived modules
+projectRoutes.get("/:projectId/archived-modules/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const allModules = await db
+    .select()
+    .from(modules)
+    .where(and(eq(modules.projectId, project.id), isNotNull(modules.archivedAt)))
+    .orderBy(desc(modules.createdAt));
+
+  if (allModules.length === 0) return c.json([]);
+
+  const moduleIds = allModules.map((m) => m.id);
+
+  const allMembers = await db
+    .select({ moduleId: moduleMembers.moduleId, memberId: moduleMembers.memberId })
+    .from(moduleMembers)
+    .where(inArray(moduleMembers.moduleId, moduleIds));
+
+  const membersByModule = new Map<string, string[]>();
+  for (const mm of allMembers) {
+    const existing = membersByModule.get(mm.moduleId) || [];
+    existing.push(mm.memberId);
+    membersByModule.set(mm.moduleId, existing);
+  }
+
+  const userFavorites = await db
+    .select({ moduleId: moduleFavorites.moduleId })
+    .from(moduleFavorites)
+    .where(and(inArray(moduleFavorites.moduleId, moduleIds), eq(moduleFavorites.userId, user.id)));
+
+  const favModuleIds = new Set(userFavorites.map((f) => f.moduleId));
+
+  const issueStats = await db
+    .select({ moduleId: moduleIssues.moduleId, stateGroup: states.group, issueCount: countFn() })
+    .from(moduleIssues)
+    .innerJoin(issues, eq(moduleIssues.issueId, issues.id))
+    .innerJoin(states, eq(issues.stateId, states.id))
+    .where(and(inArray(moduleIssues.moduleId, moduleIds), isNull(issues.archivedAt), isNull(issues.deletedAt)))
+    .groupBy(moduleIssues.moduleId, states.group);
+
+  const statsMap = new Map<string, { total: number; completed: number; cancelled: number; started: number; unstarted: number; backlog: number }>();
+  for (const row of issueStats) {
+    const existing = statsMap.get(row.moduleId) || { total: 0, completed: 0, cancelled: 0, started: 0, unstarted: 0, backlog: 0 };
+    const cnt = Number(row.issueCount);
+    existing.total += cnt;
+    switch (row.stateGroup) {
+      case "completed": existing.completed += cnt; break;
+      case "cancelled": existing.cancelled += cnt; break;
+      case "started": existing.started += cnt; break;
+      case "unstarted": existing.unstarted += cnt; break;
+      case "backlog": existing.backlog += cnt; break;
+    }
+    statsMap.set(row.moduleId, existing);
+  }
+
+  const result = allModules.map((m) => {
+    const stats = statsMap.get(m.id) || { total: 0, completed: 0, cancelled: 0, started: 0, unstarted: 0, backlog: 0 };
+    return {
+      id: m.id,
+      workspace_id: m.workspaceId,
+      project_id: m.projectId,
+      name: m.name,
+      description: m.description ?? "",
+      description_text: m.descriptionText ?? null,
+      description_html: m.descriptionHtml ?? null,
+      start_date: m.startDate?.toISOString().split("T")[0] ?? null,
+      target_date: m.targetDate?.toISOString().split("T")[0] ?? null,
+      status: m.status ?? "backlog",
+      lead_id: m.leadId ?? null,
+      member_ids: membersByModule.get(m.id) || [],
+      view_props: m.viewProps ?? {},
+      sort_order: m.sortOrder ?? 65535,
+      is_favorite: favModuleIds.has(m.id),
+      total_issues: stats.total,
+      completed_issues: stats.completed,
+      cancelled_issues: stats.cancelled,
+      started_issues: stats.started,
+      unstarted_issues: stats.unstarted,
+      backlog_issues: stats.backlog,
+      created_at: m.createdAt?.toISOString() ?? null,
+      updated_at: m.updatedAt?.toISOString() ?? null,
+      archived_at: m.archivedAt?.toISOString() ?? null,
+    };
+  });
+
+  return c.json(result);
+});
+
+// GET /:projectId/archived-modules/:moduleId/ - Archived module detail
+projectRoutes.get("/:projectId/archived-modules/:moduleId/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const moduleId = c.req.param("moduleId");
+
+  const mod = await db.query.modules.findFirst({
+    where: and(eq(modules.id, moduleId), eq(modules.projectId, project.id), isNotNull(modules.archivedAt)),
+  });
+  if (!mod) return c.json({ error: "Module not found" }, 404);
+
+  const members = await db
+    .select({ memberId: moduleMembers.memberId })
+    .from(moduleMembers)
+    .where(eq(moduleMembers.moduleId, moduleId));
+
+  const fav = await db.query.moduleFavorites.findFirst({
+    where: and(eq(moduleFavorites.moduleId, moduleId), eq(moduleFavorites.userId, user.id)),
+  });
+
+  const issueStatRows = await db
+    .select({ stateGroup: states.group, issueCount: countFn() })
+    .from(moduleIssues)
+    .innerJoin(issues, eq(moduleIssues.issueId, issues.id))
+    .innerJoin(states, eq(issues.stateId, states.id))
+    .where(and(eq(moduleIssues.moduleId, moduleId), isNull(issues.archivedAt), isNull(issues.deletedAt)))
+    .groupBy(states.group);
+
+  const stats = { total: 0, completed: 0, cancelled: 0, started: 0, unstarted: 0, backlog: 0 };
+  for (const row of issueStatRows) {
+    const cnt = Number(row.issueCount);
+    stats.total += cnt;
+    switch (row.stateGroup) {
+      case "completed": stats.completed += cnt; break;
+      case "cancelled": stats.cancelled += cnt; break;
+      case "started": stats.started += cnt; break;
+      case "unstarted": stats.unstarted += cnt; break;
+      case "backlog": stats.backlog += cnt; break;
+    }
+  }
+
+  const subIssuesResult = await db
+    .select({ count: countFn() })
+    .from(moduleIssues)
+    .innerJoin(issues, eq(moduleIssues.issueId, issues.id))
+    .where(and(eq(moduleIssues.moduleId, moduleId), isNotNull(issues.parentId), isNull(issues.archivedAt), isNull(issues.deletedAt)));
+  const subIssues = Number(subIssuesResult[0]?.count ?? 0);
+
+  const links = await db.select().from(moduleLinks).where(eq(moduleLinks.moduleId, moduleId));
+
+  return c.json({
+    id: mod.id,
+    workspace_id: mod.workspaceId,
+    project_id: mod.projectId,
+    name: mod.name,
+    description: mod.description ?? "",
+    description_text: mod.descriptionText ?? null,
+    description_html: mod.descriptionHtml ?? null,
+    start_date: mod.startDate?.toISOString().split("T")[0] ?? null,
+    target_date: mod.targetDate?.toISOString().split("T")[0] ?? null,
+    status: mod.status ?? "backlog",
+    lead_id: mod.leadId ?? null,
+    member_ids: members.map((m) => m.memberId),
+    view_props: mod.viewProps ?? {},
+    sort_order: mod.sortOrder ?? 65535,
+    is_favorite: !!fav,
+    total_issues: stats.total,
+    completed_issues: stats.completed,
+    cancelled_issues: stats.cancelled,
+    started_issues: stats.started,
+    unstarted_issues: stats.unstarted,
+    backlog_issues: stats.backlog,
+    sub_issues: subIssues,
+    link_module: links.map((l) => ({
+      id: l.id,
+      module: l.moduleId,
+      title: l.title ?? "",
+      url: l.url,
+      metadata: l.metadata ?? {},
+      created_by: l.createdById ?? null,
+      created_at: l.createdAt?.toISOString() ?? null,
+    })),
+    created_at: mod.createdAt?.toISOString() ?? null,
+    updated_at: mod.updatedAt?.toISOString() ?? null,
+    archived_at: mod.archivedAt?.toISOString() ?? null,
+  });
+});
+
+// POST /:projectId/modules/:moduleId/archive/ - Archive module (only completed or cancelled)
+projectRoutes.post("/:projectId/modules/:moduleId/archive/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const moduleId = c.req.param("moduleId");
+
+  const mod = await db.query.modules.findFirst({
+    where: and(eq(modules.id, moduleId), eq(modules.projectId, project.id)),
+  });
+  if (!mod) return c.json({ error: "Module not found" }, 404);
+
+  // Only completed or cancelled modules can be archived
+  if (mod.status !== "completed" && mod.status !== "cancelled") {
+    return c.json({ error: "Only completed or cancelled modules can be archived" }, 400);
+  }
+
+  const now = new Date();
+  await db.update(modules).set({ archivedAt: now }).where(eq(modules.id, moduleId));
+
+  // Remove favorites for this module
+  await db.delete(moduleFavorites).where(eq(moduleFavorites.moduleId, moduleId));
+
+  return c.json({ archived_at: now.toISOString() });
+});
+
+// DELETE /:projectId/modules/:moduleId/archive/ - Unarchive module
+projectRoutes.delete("/:projectId/modules/:moduleId/archive/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  if (!project || !workspace || !user) return c.json({ detail: "Not found." }, 404);
+
+  const moduleId = c.req.param("moduleId");
+
+  const mod = await db.query.modules.findFirst({
+    where: and(eq(modules.id, moduleId), eq(modules.projectId, project.id)),
+  });
+  if (!mod) return c.json({ error: "Module not found" }, 404);
+
+  await db.update(modules).set({ archivedAt: null }).where(eq(modules.id, moduleId));
+
+  return c.body(null, 204);
+});
+
+// =====================================================
+// 4.9 Module User Properties
 // =====================================================
 
 const updateModuleUserPropertiesSchema = z.object({

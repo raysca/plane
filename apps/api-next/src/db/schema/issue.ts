@@ -428,3 +428,42 @@ export const issueLinksRelations = relations(issueLinks, ({ one }) => ({
     references: [users.id],
   }),
 }));
+
+// Issue Subscribers
+export const issueSubscribers = sqliteTable(
+  "issue_subscribers",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    issueId: text("issue_id")
+      .notNull()
+      .references(() => issues.id, { onDelete: "cascade" }),
+    subscriberId: text("subscriber_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+  },
+  (table) => [
+    unique("issue_subscriber_unique").on(table.issueId, table.subscriberId),
+    index("issue_subscriber_issue_idx").on(table.issueId),
+    index("issue_subscriber_user_idx").on(table.subscriberId),
+  ]
+);
+
+export const issueSubscribersRelations = relations(issueSubscribers, ({ one }) => ({
+  issue: one(issues, {
+    fields: [issueSubscribers.issueId],
+    references: [issues.id],
+  }),
+  subscriber: one(users, {
+    fields: [issueSubscribers.subscriberId],
+    references: [users.id],
+  }),
+}));

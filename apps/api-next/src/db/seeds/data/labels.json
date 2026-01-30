@@ -1,16 +1,7 @@
 [
-  {
-    "id": 1,
-    "name": "admin",
-    "color": "#0693e3",
-    "sort_order": 85535,
-    "project_id": 1
-  },
-  {
-    "id": 2,
-    "name": "concepts",
-    "color": "#9900ef",
-    "sort_order": 95535,
-    "project_id": 1
-  }
+  { "id": 1, "name": "Bug", "color": "#EF4444", "sort_order": 1, "project_id": 1, "description": "Something isn't working" },
+  { "id": 2, "name": "Feature", "color": "#3B82F6", "sort_order": 2, "project_id": 1, "description": "New functionality" },
+  { "id": 3, "name": "Improvement", "color": "#8B5CF6", "sort_order": 3, "project_id": 1, "description": "Enhancement to existing functionality" },
+  { "id": 4, "name": "Documentation", "color": "#06B6D4", "sort_order": 4, "project_id": 1, "description": "Documentation updates" },
+  { "id": 5, "name": "Design", "color": "#EC4899", "sort_order": 5, "project_id": 1, "description": "Design related work" }
 ]

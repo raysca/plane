@@ -1,18 +1,4 @@
 [
-    {
-        "id": 1,
-        "name": "Cycle 1: Getting Started with Plane",
-        "project_id": 1,
-        "sort_order": 1,
-        "timezone": "UTC",
-        "type": "CURRENT"
-    },
-    {
-        "id": 2,
-        "name": "Cycle 2: Collaboration & Customization",
-        "project_id": 1,
-        "sort_order": 2,
-        "timezone": "UTC",
-        "type": "UPCOMING"
-    }
+  { "id": 1, "name": "Sprint 1", "description": "Current sprint", "project_id": 1, "type": "CURRENT" },
+  { "id": 2, "name": "Sprint 2", "description": "Upcoming sprint", "project_id": 1, "type": "UPCOMING" }
 ]

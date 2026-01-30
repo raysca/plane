@@ -4,8 +4,11 @@ import { InstanceService } from "../services/instance.service";
 import { InstanceConfigurationService } from "../services/instance-configuration.service";
 import { db } from "../db";
 import { users, instanceAdmins, accounts } from "../db/schema";
+import { workspaces } from "../db/schema/workspace";
 import { eq, and } from "drizzle-orm";
 import type { Variables } from "../app";
+import { seedWorkspace } from "../lib/workspace-seeder";
+import { auth } from "../lib/auth";
 
 declare const Bun: any;
 
@@ -14,7 +17,20 @@ const instanceService = new InstanceService();
 const configService = new InstanceConfigurationService();
 
 const isInstanceAdmin = async (c: any, next: any) => {
-    const user = c.get("user");
+    // Resolve session if user not already set on context
+    let user = c.get("user");
+    if (!user) {
+        try {
+            const session = await auth.api.getSession({ headers: c.req.raw.headers });
+            if (session?.user) {
+                c.set("user", session.user);
+                c.set("session", session.session);
+                user = session.user;
+            }
+        } catch {
+            // session resolution failed
+        }
+    }
     if (!user) {
         return c.json({ detail: "Authentication required" }, 401);
     }
@@ -252,5 +268,32 @@ instanceRoutes.get("/workspace-slug-check/", async (c) => {
     return c.json(result);
 });
 
+
+// Seed Data
+instanceRoutes.post("/seed/", isInstanceAdmin, async (c) => {
+    try {
+        const body = await c.req.json();
+        const workspaceId = body.workspace_id;
+
+        if (!workspaceId) {
+            return c.json({ detail: "workspace_id is required" }, 400);
+        }
+
+        // Verify workspace exists
+        const workspace = await db.query.workspaces.findFirst({
+            where: eq(workspaces.id, workspaceId),
+        });
+        if (!workspace) {
+            return c.json({ detail: "Workspace not found" }, 404);
+        }
+
+        const user = c.get("user");
+        await seedWorkspace(workspaceId, user!.id);
+
+        return c.json({ status: "success", message: "Workspace seeded successfully" });
+    } catch (error: any) {
+        return c.json({ detail: error.message || "Failed to seed workspace" }, 400);
+    }
+});
 
 export { instanceRoutes };
