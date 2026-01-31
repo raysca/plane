@@ -33,6 +33,7 @@ import { pages } from "../../db/schema/page";
 import { cycles, cycleIssues, cycleFavorites } from "../../db/schema/cycle";
 import { modules, moduleIssues, moduleMembers, moduleFavorites, moduleLinks } from "../../db/schema/module";
 import { views, viewFavorites } from "../../db/schema/view";
+import { intakeIssues } from "../../db/schema/intake";
 import { sql, not, like, isNull, count, count as countFn, lt, gt, gte, lte, max, or, isNotNull } from "drizzle-orm";
 import homePreferenceRoutes from "./home-preference";
 import userPropertiesRoutes from "./user-properties";
@@ -2057,14 +2058,7 @@ workspaceRoutes.get("/:slug/my-issues/", async (c) => {
   })));
 });
 
-// Search
-workspaceRoutes.get("/:slug/search/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
-});
-
-workspaceRoutes.get("/:slug/entity-search/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
-});
+// Search - implemented at end of file
 
 // Notifications (placeholder for full list)
 workspaceRoutes.get("/:slug/users/notifications/", async (c) => {
@@ -4424,6 +4418,634 @@ workspaceRoutes.get("/:slug/work-items/:identifier/", workspaceMiddleware, async
   }).catch(() => {});
 
   return c.json(result);
+});
+
+// ==================== SEARCH ENDPOINTS ====================
+
+// Helper: compute cycle status from dates
+function computeCycleStatus(startDate: Date | null, endDate: Date | null): string {
+  const now = new Date();
+  if (startDate && endDate && startDate <= now && endDate >= now) return "CURRENT";
+  if (startDate && startDate > now) return "UPCOMING";
+  if (endDate && endDate < now) return "COMPLETED";
+  if (!startDate && !endDate) return "DRAFT";
+  return "DRAFT";
+}
+
+// GET /:slug/search/ - Global search (command palette)
+workspaceRoutes.get("/:slug/search/", workspaceMiddleware, requireWorkspaceMember, async (c) => {
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  const query = c.req.query("search") || "";
+  const entitiesParam = c.req.query("entities") || "";
+  const workspaceSearch = c.req.query("workspace_search") || "false";
+  const projectIdParam = c.req.query("project_id") || "";
+
+  const allEntities = ["workspace", "project", "issue", "cycle", "module", "issue_view", "page", "intake"];
+  let requestedEntities: string[];
+  if (entitiesParam) {
+    requestedEntities = entitiesParam.split(",").map((e) => e.trim()).filter((e) => allEntities.includes(e));
+  } else {
+    requestedEntities = allEntities;
+  }
+
+  // Get user's project memberships for filtering
+  const userProjectMemberships = await db
+    .select({ projectId: projectMembers.projectId })
+    .from(projectMembers)
+    .innerJoin(projects, eq(projects.id, projectMembers.projectId))
+    .where(and(
+      eq(projectMembers.memberId, user.id),
+      eq(projects.workspaceId, workspace.id),
+      isNull(projects.archivedAt),
+    ));
+  const userProjectIds = userProjectMemberships.map((m) => m.projectId);
+
+  const results: Record<string, unknown[]> = {};
+
+  for (const entity of requestedEntities) {
+    if (entity === "workspace") {
+      if (query) {
+        const ws = await db
+          .select({ name: workspaces.name, id: workspaces.id, slug: workspaces.slug })
+          .from(workspaces)
+          .innerJoin(workspaceMembers, eq(workspaceMembers.workspaceId, workspaces.id))
+          .where(and(
+            eq(workspaceMembers.userId, user.id),
+            like(workspaces.name, `%${query}%`),
+          ))
+          .orderBy(desc(workspaces.createdAt));
+        results.workspace = ws;
+      } else {
+        const ws = await db
+          .select({ name: workspaces.name, id: workspaces.id, slug: workspaces.slug })
+          .from(workspaces)
+          .innerJoin(workspaceMembers, eq(workspaceMembers.workspaceId, workspaces.id))
+          .where(eq(workspaceMembers.userId, user.id))
+          .orderBy(desc(workspaces.createdAt));
+        results.workspace = ws;
+      }
+    }
+
+    if (entity === "project") {
+      if (userProjectIds.length === 0) { results.project = []; continue; }
+      let projectQuery = db
+        .select({
+          name: projects.name,
+          id: projects.id,
+          identifier: projects.identifier,
+          workspace__slug: sql<string>`${workspace.slug}`.as("workspace__slug"),
+        })
+        .from(projects)
+        .where(and(
+          inArray(projects.id, userProjectIds),
+          eq(projects.workspaceId, workspace.id),
+          isNull(projects.archivedAt),
+          query ? or(like(projects.name, `%${query}%`), like(projects.identifier, `%${query}%`)) : undefined,
+        ))
+        .orderBy(desc(projects.createdAt));
+      results.project = await projectQuery;
+    }
+
+    if (entity === "issue") {
+      if (userProjectIds.length === 0) { results.issue = []; continue; }
+      const conditions: any[] = [
+        eq(issues.workspaceId, workspace.id),
+        isNull(issues.archivedAt),
+        isNull(issues.deletedAt),
+        inArray(issues.projectId, userProjectIds),
+      ];
+      if (workspaceSearch === "false" && projectIdParam) {
+        conditions.push(eq(issues.projectId, projectIdParam));
+      }
+      if (query) {
+        const orConditions: any[] = [like(issues.name, `%${query}%`)];
+        // Check for sequence_id (numeric match)
+        const sequences = query.match(/\b\d+\b/g);
+        if (sequences) {
+          for (const seq of sequences) {
+            orConditions.push(eq(issues.sequenceId, parseInt(seq, 10)));
+          }
+        }
+        // Check for project identifier match
+        orConditions.push(sql`EXISTS (SELECT 1 FROM projects WHERE projects.id = ${issues.projectId} AND projects.identifier LIKE ${'%' + query + '%'})`);
+        conditions.push(or(...orConditions));
+      }
+      const issueRows = await db
+        .select({
+          name: issues.name,
+          id: issues.id,
+          sequence_id: issues.sequenceId,
+          project_id: issues.projectId,
+          workspace__slug: sql<string>`${workspace.slug}`.as("workspace__slug"),
+        })
+        .from(issues)
+        .where(and(...conditions))
+        .orderBy(desc(issues.createdAt))
+        .limit(100);
+
+      // Add project__identifier via lookup
+      const issueProjectIds = [...new Set(issueRows.map((i) => i.project_id))];
+      const projectLookup = new Map<string, string>();
+      if (issueProjectIds.length > 0) {
+        const projRows = await db
+          .select({ id: projects.id, identifier: projects.identifier })
+          .from(projects)
+          .where(inArray(projects.id, issueProjectIds));
+        for (const p of projRows) projectLookup.set(p.id, p.identifier);
+      }
+      results.issue = issueRows.map((i) => ({
+        ...i,
+        project__identifier: projectLookup.get(i.project_id) ?? "",
+      }));
+    }
+
+    if (entity === "cycle") {
+      if (userProjectIds.length === 0) { results.cycle = []; continue; }
+      const conditions: any[] = [
+        eq(cycles.workspaceId, workspace.id),
+        inArray(cycles.projectId, userProjectIds),
+      ];
+      if (workspaceSearch === "false" && projectIdParam) {
+        conditions.push(eq(cycles.projectId, projectIdParam));
+      }
+      if (query) {
+        conditions.push(like(cycles.name, `%${query}%`));
+      }
+      const cycleRows = await db
+        .select({
+          name: cycles.name,
+          id: cycles.id,
+          project_id: cycles.projectId,
+          startDate: cycles.startDate,
+          endDate: cycles.endDate,
+          workspace__slug: sql<string>`${workspace.slug}`.as("workspace__slug"),
+        })
+        .from(cycles)
+        .where(and(...conditions))
+        .orderBy(desc(cycles.createdAt));
+
+      const cycleProjectIds = [...new Set(cycleRows.map((c) => c.project_id))];
+      const cycleProjLookup = new Map<string, string>();
+      if (cycleProjectIds.length > 0) {
+        const projRows = await db.select({ id: projects.id, identifier: projects.identifier }).from(projects).where(inArray(projects.id, cycleProjectIds));
+        for (const p of projRows) cycleProjLookup.set(p.id, p.identifier);
+      }
+      results.cycle = cycleRows.map((c) => ({
+        name: c.name,
+        id: c.id,
+        project_id: c.project_id,
+        project__identifier: cycleProjLookup.get(c.project_id) ?? "",
+        status: computeCycleStatus(c.startDate, c.endDate),
+        workspace__slug: c.workspace__slug,
+      }));
+    }
+
+    if (entity === "module") {
+      if (userProjectIds.length === 0) { results.module = []; continue; }
+      const conditions: any[] = [
+        eq(modules.workspaceId, workspace.id),
+        inArray(modules.projectId, userProjectIds),
+      ];
+      if (workspaceSearch === "false" && projectIdParam) {
+        conditions.push(eq(modules.projectId, projectIdParam));
+      }
+      if (query) {
+        conditions.push(like(modules.name, `%${query}%`));
+      }
+      const moduleRows = await db
+        .select({
+          name: modules.name,
+          id: modules.id,
+          project_id: modules.projectId,
+          status: modules.status,
+          workspace__slug: sql<string>`${workspace.slug}`.as("workspace__slug"),
+        })
+        .from(modules)
+        .where(and(...conditions))
+        .orderBy(desc(modules.createdAt));
+
+      const moduleProjectIds = [...new Set(moduleRows.map((m) => m.project_id))];
+      const moduleProjLookup = new Map<string, string>();
+      if (moduleProjectIds.length > 0) {
+        const projRows = await db.select({ id: projects.id, identifier: projects.identifier }).from(projects).where(inArray(projects.id, moduleProjectIds));
+        for (const p of projRows) moduleProjLookup.set(p.id, p.identifier);
+      }
+      results.module = moduleRows.map((m) => ({
+        ...m,
+        project__identifier: moduleProjLookup.get(m.project_id) ?? "",
+      }));
+    }
+
+    if (entity === "issue_view") {
+      if (userProjectIds.length === 0) { results.issue_view = []; continue; }
+      const conditions: any[] = [
+        eq(views.workspaceId, workspace.id),
+        inArray(views.projectId, userProjectIds),
+      ];
+      if (workspaceSearch === "false" && projectIdParam) {
+        conditions.push(eq(views.projectId, projectIdParam));
+      }
+      if (query) {
+        conditions.push(like(views.name, `%${query}%`));
+      }
+      const viewRows = await db
+        .select({
+          name: views.name,
+          id: views.id,
+          project_id: views.projectId,
+          workspace__slug: sql<string>`${workspace.slug}`.as("workspace__slug"),
+        })
+        .from(views)
+        .where(and(...conditions))
+        .orderBy(desc(views.createdAt));
+
+      const viewProjectIds = [...new Set(viewRows.filter((v) => v.project_id).map((v) => v.project_id!))];
+      const viewProjLookup = new Map<string, string>();
+      if (viewProjectIds.length > 0) {
+        const projRows = await db.select({ id: projects.id, identifier: projects.identifier }).from(projects).where(inArray(projects.id, viewProjectIds));
+        for (const p of projRows) viewProjLookup.set(p.id, p.identifier);
+      }
+      results.issue_view = viewRows.map((v) => ({
+        ...v,
+        project__identifier: v.project_id ? viewProjLookup.get(v.project_id) ?? "" : "",
+      }));
+    }
+
+    if (entity === "page") {
+      if (userProjectIds.length === 0) { results.page = []; continue; }
+      const conditions: any[] = [
+        eq(pages.workspaceId, workspace.id),
+      ];
+      if (workspaceSearch === "false" && projectIdParam) {
+        conditions.push(eq(pages.projectId, projectIdParam));
+      }
+      if (query) {
+        conditions.push(like(pages.name, `%${query}%`));
+      }
+      const pageRows = await db
+        .select({
+          name: pages.name,
+          id: pages.id,
+          project_ids: pages.projectId,
+          workspace__slug: sql<string>`${workspace.slug}`.as("workspace__slug"),
+        })
+        .from(pages)
+        .where(and(...conditions))
+        .orderBy(desc(pages.createdAt));
+
+      results.page = pageRows.map((p) => ({
+        name: p.name,
+        id: p.id,
+        project_ids: p.project_ids ? [p.project_ids] : [],
+        workspace__slug: p.workspace__slug,
+      }));
+    }
+
+    if (entity === "intake") {
+      if (userProjectIds.length === 0) { results.intake = []; continue; }
+      const conditions: any[] = [
+        eq(issues.workspaceId, workspace.id),
+        isNull(issues.archivedAt),
+        isNull(issues.deletedAt),
+        inArray(issues.projectId, userProjectIds),
+        or(eq(intakeIssues.status, 0), eq(intakeIssues.status, -2)),
+      ];
+      if (workspaceSearch === "false" && projectIdParam) {
+        conditions.push(eq(issues.projectId, projectIdParam));
+      }
+      if (query) {
+        const orConditions: any[] = [like(issues.name, `%${query}%`)];
+        const sequences = query.match(/\b\d+\b/g);
+        if (sequences) {
+          for (const seq of sequences) {
+            orConditions.push(eq(issues.sequenceId, parseInt(seq, 10)));
+          }
+        }
+        orConditions.push(sql`EXISTS (SELECT 1 FROM projects WHERE projects.id = ${issues.projectId} AND projects.identifier LIKE ${'%' + query + '%'})`);
+        conditions.push(or(...orConditions));
+      }
+      const intakeRows = await db
+        .select({
+          name: issues.name,
+          id: issues.id,
+          sequence_id: issues.sequenceId,
+          project_id: issues.projectId,
+          workspace__slug: sql<string>`${workspace.slug}`.as("workspace__slug"),
+        })
+        .from(issues)
+        .innerJoin(intakeIssues, eq(intakeIssues.issueId, issues.id))
+        .where(and(...conditions))
+        .orderBy(desc(issues.createdAt))
+        .limit(100);
+
+      const intakeProjectIds = [...new Set(intakeRows.map((i) => i.project_id))];
+      const intakeProjLookup = new Map<string, string>();
+      if (intakeProjectIds.length > 0) {
+        const projRows = await db.select({ id: projects.id, identifier: projects.identifier }).from(projects).where(inArray(projects.id, intakeProjectIds));
+        for (const p of projRows) intakeProjLookup.set(p.id, p.identifier);
+      }
+      results.intake = intakeRows.map((i) => ({
+        ...i,
+        project__identifier: intakeProjLookup.get(i.project_id) ?? "",
+      }));
+    }
+  }
+
+  return c.json({ results });
+});
+
+// GET /:slug/entity-search/ - Entity-specific search (for mentions, work item pickers, etc.)
+workspaceRoutes.get("/:slug/entity-search/", workspaceMiddleware, requireWorkspaceMember, async (c) => {
+  const workspace = c.get("workspace");
+  const user = c.get("user");
+  const query = c.req.query("query") || "";
+  const queryTypesParam = c.req.query("query_type") || "user_mention";
+  const queryTypes = queryTypesParam.split(",").map((t) => t.trim());
+  const countLimit = Math.min(parseInt(c.req.query("count") || "5", 10) || 5, 100);
+  const projectIdParam = c.req.query("project_id") || "";
+
+  // Get user's project memberships
+  const userProjectMemberships = await db
+    .select({ projectId: projectMembers.projectId })
+    .from(projectMembers)
+    .innerJoin(projects, eq(projects.id, projectMembers.projectId))
+    .where(and(
+      eq(projectMembers.memberId, user.id),
+      eq(projects.workspaceId, workspace.id),
+      isNull(projects.archivedAt),
+    ));
+  const userProjectIds = userProjectMemberships.map((m) => m.projectId);
+
+  const responseData: Record<string, unknown[]> = {};
+
+  for (const queryType of queryTypes) {
+    if (queryType === "user_mention") {
+      if (projectIdParam) {
+        // Search project members
+        const conditions: any[] = [
+          eq(projectMembers.projectId, projectIdParam),
+        ];
+        if (query) {
+          conditions.push(
+            sql`EXISTS (SELECT 1 FROM users WHERE users.id = ${projectMembers.memberId} AND (users.display_name LIKE ${'%' + query + '%'} OR users.name LIKE ${'%' + query + '%'}))`
+          );
+        }
+        const members = await db
+          .select({
+            member__id: projectMembers.memberId,
+          })
+          .from(projectMembers)
+          .where(and(...conditions))
+          .orderBy(desc(projectMembers.createdAt))
+          .limit(countLimit);
+
+        // Fetch user details
+        const memberIds = members.map((m) => m.member__id);
+        if (memberIds.length > 0) {
+          const userRows = await db
+            .select({ id: users.id, displayName: users.displayName, avatar: users.avatar })
+            .from(users)
+            .where(inArray(users.id, memberIds));
+          const userMap = new Map(userRows.map((u) => [u.id, u]));
+          responseData.user_mention = members.map((m) => {
+            const u = userMap.get(m.member__id);
+            return {
+              member__id: m.member__id,
+              member__display_name: u?.displayName ?? "",
+              member__avatar_url: u?.avatar ?? null,
+            };
+          });
+        } else {
+          responseData.user_mention = [];
+        }
+      } else {
+        // Search workspace members
+        const conditions: any[] = [
+          eq(workspaceMembers.workspaceId, workspace.id),
+        ];
+        if (query) {
+          conditions.push(
+            sql`EXISTS (SELECT 1 FROM users WHERE users.id = ${workspaceMembers.userId} AND (users.display_name LIKE ${'%' + query + '%'} OR users.name LIKE ${'%' + query + '%'}))`
+          );
+        }
+        const members = await db
+          .select({
+            member__id: workspaceMembers.userId,
+          })
+          .from(workspaceMembers)
+          .where(and(...conditions))
+          .orderBy(desc(workspaceMembers.createdAt))
+          .limit(countLimit);
+
+        const memberIds = members.map((m) => m.member__id);
+        if (memberIds.length > 0) {
+          const userRows = await db
+            .select({ id: users.id, displayName: users.displayName, avatar: users.avatar })
+            .from(users)
+            .where(inArray(users.id, memberIds));
+          const userMap = new Map(userRows.map((u) => [u.id, u]));
+          responseData.user_mention = members.map((m) => {
+            const u = userMap.get(m.member__id);
+            return {
+              member__id: m.member__id,
+              member__display_name: u?.displayName ?? "",
+              member__avatar_url: u?.avatar ?? null,
+            };
+          });
+        } else {
+          responseData.user_mention = [];
+        }
+      }
+    }
+
+    if (queryType === "project") {
+      const conditions: any[] = [
+        eq(projects.workspaceId, workspace.id),
+      ];
+      if (query) {
+        conditions.push(or(like(projects.name, `%${query}%`), like(projects.identifier, `%${query}%`)));
+      }
+      // User must be member OR project is public (network=2)
+      if (userProjectIds.length > 0) {
+        conditions.push(or(inArray(projects.id, userProjectIds), eq(projects.network, 2)));
+      } else {
+        conditions.push(eq(projects.network, 2));
+      }
+      const projectRows = await db
+        .select({
+          name: projects.name,
+          id: projects.id,
+          identifier: projects.identifier,
+          logo_props: projects.logoProps,
+          workspace__slug: sql<string>`${workspace.slug}`.as("workspace__slug"),
+        })
+        .from(projects)
+        .where(and(...conditions))
+        .orderBy(desc(projects.createdAt))
+        .limit(countLimit);
+      responseData.project = projectRows;
+    }
+
+    if (queryType === "issue") {
+      if (userProjectIds.length === 0) { responseData.issue = []; continue; }
+      const conditions: any[] = [
+        eq(issues.workspaceId, workspace.id),
+        isNull(issues.archivedAt),
+        isNull(issues.deletedAt),
+      ];
+      if (projectIdParam) {
+        conditions.push(eq(issues.projectId, projectIdParam));
+      } else {
+        conditions.push(inArray(issues.projectId, userProjectIds));
+      }
+      if (query) {
+        const orConditions: any[] = [like(issues.name, `%${query}%`)];
+        const sequences = query.match(/\b\d+\b/g);
+        if (sequences) {
+          for (const seq of sequences) {
+            orConditions.push(eq(issues.sequenceId, parseInt(seq, 10)));
+          }
+        }
+        orConditions.push(sql`EXISTS (SELECT 1 FROM projects WHERE projects.id = ${issues.projectId} AND projects.identifier LIKE ${'%' + query + '%'})`);
+        conditions.push(or(...orConditions));
+      }
+      const issueRows = await db
+        .select({
+          name: issues.name,
+          id: issues.id,
+          sequence_id: issues.sequenceId,
+          project_id: issues.projectId,
+          priority: issues.priority,
+          state_id: issues.stateId,
+        })
+        .from(issues)
+        .where(and(...conditions))
+        .orderBy(desc(issues.createdAt))
+        .limit(countLimit);
+
+      // Add project__identifier
+      const issueProjectIds = [...new Set(issueRows.map((i) => i.project_id))];
+      const projLookup = new Map<string, string>();
+      if (issueProjectIds.length > 0) {
+        const projRows = await db.select({ id: projects.id, identifier: projects.identifier }).from(projects).where(inArray(projects.id, issueProjectIds));
+        for (const p of projRows) projLookup.set(p.id, p.identifier);
+      }
+      responseData.issue = issueRows.map((i) => ({
+        ...i,
+        type_id: null,
+        project__identifier: projLookup.get(i.project_id) ?? "",
+      }));
+    }
+
+    if (queryType === "cycle") {
+      if (userProjectIds.length === 0) { responseData.cycle = []; continue; }
+      const conditions: any[] = [
+        eq(cycles.workspaceId, workspace.id),
+      ];
+      if (projectIdParam) {
+        conditions.push(eq(cycles.projectId, projectIdParam));
+      } else {
+        conditions.push(inArray(cycles.projectId, userProjectIds));
+      }
+      if (query) {
+        conditions.push(like(cycles.name, `%${query}%`));
+      }
+      const cycleRows = await db
+        .select({
+          name: cycles.name,
+          id: cycles.id,
+          project_id: cycles.projectId,
+          startDate: cycles.startDate,
+          endDate: cycles.endDate,
+          workspace__slug: sql<string>`${workspace.slug}`.as("workspace__slug"),
+        })
+        .from(cycles)
+        .where(and(...conditions))
+        .orderBy(desc(cycles.createdAt))
+        .limit(countLimit);
+
+      const cycleProjectIds = [...new Set(cycleRows.map((c) => c.project_id))];
+      const cycleProjLookup = new Map<string, string>();
+      if (cycleProjectIds.length > 0) {
+        const projRows = await db.select({ id: projects.id, identifier: projects.identifier }).from(projects).where(inArray(projects.id, cycleProjectIds));
+        for (const p of projRows) cycleProjLookup.set(p.id, p.identifier);
+      }
+      responseData.cycle = cycleRows.map((c) => ({
+        name: c.name,
+        id: c.id,
+        project_id: c.project_id,
+        project__identifier: cycleProjLookup.get(c.project_id) ?? "",
+        status: computeCycleStatus(c.startDate, c.endDate),
+        workspace__slug: c.workspace__slug,
+      }));
+    }
+
+    if (queryType === "module") {
+      if (userProjectIds.length === 0) { responseData.module = []; continue; }
+      const conditions: any[] = [
+        eq(modules.workspaceId, workspace.id),
+      ];
+      if (projectIdParam) {
+        conditions.push(eq(modules.projectId, projectIdParam));
+      } else {
+        conditions.push(inArray(modules.projectId, userProjectIds));
+      }
+      if (query) {
+        conditions.push(like(modules.name, `%${query}%`));
+      }
+      const moduleRows = await db
+        .select({
+          name: modules.name,
+          id: modules.id,
+          project_id: modules.projectId,
+          status: modules.status,
+          workspace__slug: sql<string>`${workspace.slug}`.as("workspace__slug"),
+        })
+        .from(modules)
+        .where(and(...conditions))
+        .orderBy(desc(modules.createdAt))
+        .limit(countLimit);
+
+      const moduleProjectIds = [...new Set(moduleRows.map((m) => m.project_id))];
+      const moduleProjLookup = new Map<string, string>();
+      if (moduleProjectIds.length > 0) {
+        const projRows = await db.select({ id: projects.id, identifier: projects.identifier }).from(projects).where(inArray(projects.id, moduleProjectIds));
+        for (const p of projRows) moduleProjLookup.set(p.id, p.identifier);
+      }
+      responseData.module = moduleRows.map((m) => ({
+        ...m,
+        project__identifier: moduleProjLookup.get(m.project_id) ?? "",
+      }));
+    }
+
+    if (queryType === "page") {
+      const conditions: any[] = [
+        eq(pages.workspaceId, workspace.id),
+        eq(pages.accessLevel, 0),
+      ];
+      if (projectIdParam) {
+        conditions.push(eq(pages.projectId, projectIdParam));
+      }
+      if (query) {
+        conditions.push(like(pages.name, `%${query}%`));
+      }
+      const pageRows = await db
+        .select({
+          name: pages.name,
+          id: pages.id,
+          projects__id: pages.projectId,
+          workspace__slug: sql<string>`${workspace.slug}`.as("workspace__slug"),
+        })
+        .from(pages)
+        .where(and(...conditions))
+        .orderBy(desc(pages.createdAt))
+        .limit(countLimit);
+      responseData.page = pageRows;
+    }
+  }
+
+  return c.json(responseData);
 });
 
 export { workspaceRoutes };

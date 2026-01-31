@@ -37,3 +37,5 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 data/plane.db
 data/plane.db-*
 local.db
+plane.db
+plane.db-*
