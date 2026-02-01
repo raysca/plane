@@ -15,6 +15,7 @@ import {
   recentVisits,
 } from "../../db/schema/workspace";
 import { projects, projectMembers } from "../../db/schema/project";
+import { issues, issueActivities } from "../../db/schema/issue";
 import { notificationPreferences } from "../../db/schema/notification";
 import { authMiddleware } from "../../middleware/auth";
 import type { Variables } from "../../app";
@@ -589,35 +590,114 @@ userRoutes.get("/me/workspaces/", async (c) => {
   return c.json(workspaceList);
 });
 
-// GET /api/users/me/activities/ - Get user activities (recent visits)
+// GET /api/users/me/activities/ - Get user issue activities (cursor-paginated)
 userRoutes.get("/me/activities/", async (c) => {
   const contextUser = c.get("user");
   if (!contextUser) {
     return c.json({ detail: "Authentication required." }, 401);
   }
 
-  // Get recent visits with workspace data
-  const visits = await db
-    .select({
-      visit: recentVisits,
-      workspace: workspaces,
-    })
-    .from(recentVisits)
-    .innerJoin(workspaces, eq(recentVisits.workspaceId, workspaces.id))
-    .where(eq(recentVisits.userId, contextUser.id))
-    .orderBy(desc(recentVisits.visitedAt))
-    .limit(20);
+  const perPage = Math.min(parseInt(c.req.query("per_page") || "100"), 1000);
+  const cursor = c.req.query("cursor") || `${perPage}:0:0`;
+  const [, offsetStr] = cursor.split(":");
+  const offset = parseInt(offsetStr || "0");
 
-  const activities = visits.map((v) => ({
-    id: v.visit.id,
-    workspace_id: v.visit.workspaceId,
-    workspace_slug: v.workspace.slug,
-    entity_type: v.visit.entityType,
-    entity_id: v.visit.entityId,
-    visited_at: v.visit.visitedAt?.toISOString() ?? null,
+  // Count total activities
+  const [{ total }] = await db
+    .select({ total: sql<number>`count(*)` })
+    .from(issueActivities)
+    .where(eq(issueActivities.actorId, contextUser.id));
+
+  // Fetch activities with related data
+  const activities = await db
+    .select({
+      activity: issueActivities,
+      actor: users,
+      project: projects,
+      workspace: workspaces,
+      issue: issues,
+    })
+    .from(issueActivities)
+    .leftJoin(users, eq(issueActivities.actorId, users.id))
+    .leftJoin(projects, eq(issueActivities.projectId, projects.id))
+    .leftJoin(workspaces, eq(issueActivities.workspaceId, workspaces.id))
+    .leftJoin(issues, eq(issueActivities.issueId, issues.id))
+    .where(eq(issueActivities.actorId, contextUser.id))
+    .orderBy(desc(issueActivities.createdAt))
+    .limit(perPage)
+    .offset(offset);
+
+  const totalPages = Math.ceil(total / perPage);
+  const hasNext = offset + perPage < total;
+  const hasPrev = offset > 0;
+  const nextOffset = offset + perPage;
+  const prevOffset = Math.max(0, offset - perPage);
+
+  const results = activities.map((a) => ({
+    id: a.activity.id,
+    issue: a.activity.issueId,
+    field: a.activity.field ?? null,
+    old_value: a.activity.oldValue ?? null,
+    new_value: a.activity.newValue ?? null,
+    verb: a.activity.verb,
+    old_identifier: a.activity.oldIdentifier ?? null,
+    new_identifier: a.activity.newIdentifier ?? null,
+    epoch: a.activity.epochTimestamp ?? null,
+    project: a.activity.projectId,
+    workspace: a.activity.workspaceId,
+    actor: a.activity.actorId,
+    created_at: a.activity.createdAt?.toISOString() ?? null,
+    updated_at: a.activity.createdAt?.toISOString() ?? null,
+    actor_detail: a.actor
+      ? {
+          id: a.actor.id,
+          display_name: a.actor.displayName ?? a.actor.name ?? "",
+          first_name: a.actor.name ?? "",
+          avatar: a.actor.avatar ?? "",
+        }
+      : null,
+    issue_detail: a.issue
+      ? {
+          id: a.issue.id,
+          name: a.issue.name,
+          sequence_id: a.issue.sequenceId ?? null,
+        }
+      : null,
+    project_detail: a.project
+      ? {
+          id: a.project.id,
+          name: a.project.name,
+          identifier: a.project.identifier,
+          emoji: a.project.emoji ?? null,
+          icon_prop: a.project.iconProp ?? null,
+          logo_props: a.project.logoProps ?? {},
+          cover_image: a.project.coverImage ?? null,
+          description: a.project.description ?? "",
+        }
+      : null,
+    workspace_detail: a.workspace
+      ? {
+          id: a.workspace.id,
+          name: a.workspace.name,
+          slug: a.workspace.slug,
+        }
+      : null,
   }));
 
-  return c.json(activities);
+  return c.json({
+    grouped_by: null,
+    sub_grouped_by: null,
+    total_count: total,
+    next_cursor: `${perPage}:${nextOffset}:0`,
+    prev_cursor: `${perPage}:${prevOffset}:1`,
+    next_page_results: hasNext,
+    prev_page_results: hasPrev,
+    count: results.length,
+    total_pages: totalPages,
+    total_results: total,
+    extra_stats: null,
+    results,
+  });
 });
 
 // GET /api/users/me/notification-preferences/ - Get notification preferences
