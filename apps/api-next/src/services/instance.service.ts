@@ -281,7 +281,7 @@ export class InstanceService {
         if (RESTRICTED.includes(slug.toLowerCase())) return { status: false };
 
         const existing = await db.select().from(workspaces).where(eq(workspaces.slug, slug)).limit(1);
-        return { status: existing.length > 0 };
+        return { status: existing.length === 0 };
     }
 
     private async getInstanceConfiguration() {
