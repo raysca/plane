@@ -139,8 +139,21 @@ const createReactionSchema = z.object({
 });
 
 const createRelationSchema = z.object({
-  related_issue_id: z.string().min(1),
-  relation_type: z.enum(["blocks", "is_blocked_by", "duplicate_of", "relates_to"]),
+  relation_type: z.enum([
+    "blocking", "blocked_by", "duplicate", "relates_to",
+    "start_before", "start_after", "finish_before", "finish_after",
+    "implemented_by", "implements",
+  ]),
+  issues: z.array(z.string().min(1)).min(1),
+});
+
+const removeRelationSchema = z.object({
+  relation_type: z.enum([
+    "blocking", "blocked_by", "duplicate", "relates_to",
+    "start_before", "start_after", "finish_before", "finish_after",
+    "implemented_by", "implements",
+  ]),
+  related_issue: z.string().min(1),
 });
 
 const createLinkSchema = z.object({
@@ -405,6 +418,51 @@ function formatRelation(r: typeof issueRelations.$inferSelect) {
     related_issue_id: r.relatedIssueId,
     relation_type: r.relationType,
     created_at: r.createdAt?.toISOString() ?? null,
+  };
+}
+
+// Maps UI relation types to what gets stored in the database
+function getActualRelation(relationType: string): string {
+  const mapping: Record<string, string> = {
+    start_after: "start_before",
+    finish_after: "finish_before",
+    blocking: "blocked_by",
+    blocked_by: "blocked_by",
+    start_before: "start_before",
+    finish_before: "finish_before",
+    implemented_by: "implemented_by",
+    implements: "implemented_by",
+  };
+  return mapping[relationType] ?? relationType;
+}
+
+// Whether the relation type should swap issue/related_issue direction
+function isReversedRelation(relationType: string): boolean {
+  return ["blocking", "start_after", "finish_after", "implements"].includes(relationType);
+}
+
+// Format a related issue for the grouped response
+function formatRelatedIssue(
+  issue: typeof issues.$inferSelect,
+  relationType: string,
+  assigneeIds: string[],
+  labelIds: string[],
+) {
+  return {
+    id: issue.id,
+    name: issue.name,
+    state_id: issue.stateId,
+    sort_order: issue.sortOrder ?? 65535,
+    priority: issue.priority ?? "none",
+    sequence_id: issue.sequenceId ?? 0,
+    project_id: issue.projectId,
+    label_ids: labelIds,
+    assignee_ids: assigneeIds,
+    created_at: issue.createdAt?.toISOString() ?? null,
+    updated_at: issue.updatedAt?.toISOString() ?? null,
+    created_by: issue.createdById ?? null,
+    updated_by: issue.createdById ?? null,
+    relation_type: relationType,
   };
 }
 
@@ -1663,51 +1721,247 @@ issueRoutes.delete("/:issueId/comments/:commentId/reactions/:reactionId/", requi
 // 5.7 Issue Relations
 // =====================================================
 
-// GET /:issueId/issue-relation/ - List relations
+// GET /:issueId/issue-relation/ - List relations (grouped by type with enriched issue data)
 issueRoutes.get("/:issueId/issue-relation/", async (c) => {
   const issueId = c.req.param("issueId");
 
-  const relations = await db.query.issueRelations.findMany({
+  // Fetch all relations involving this issue (both directions)
+  const allRelations = await db.query.issueRelations.findMany({
     where: or(
       eq(issueRelations.issueId, issueId),
       eq(issueRelations.relatedIssueId, issueId)
     ),
   });
 
-  return c.json(relations.map(formatRelation));
+  // Categorize relation IDs by type
+  // blocked_by stored as: issue_id=blocker, related_issue_id=blocked
+  // So if we ARE the issue_id, we are blocking related_issue → "blocking" from our perspective means related_issue blocks us? No.
+  // Actually in Django: issue_id=X, related_issue_id=Y, relation_type="blocked_by" means X is blocked by Y
+  // So from X's perspective: Y is in "blocked_by" list
+  // From Y's perspective: X is in "blocking" list (Y blocks X)
+
+  const categorized: Record<string, Set<string>> = {
+    blocking: new Set(),
+    blocked_by: new Set(),
+    duplicate: new Set(),
+    relates_to: new Set(),
+    start_after: new Set(),
+    start_before: new Set(),
+    finish_after: new Set(),
+    finish_before: new Set(),
+    implements: new Set(),
+    implemented_by: new Set(),
+  };
+
+  for (const rel of allRelations) {
+    if (rel.relationType === "blocked_by") {
+      if (rel.issueId === issueId) {
+        // issue is blocked_by related_issue
+        categorized.blocked_by.add(rel.relatedIssueId);
+      } else {
+        // related_issue is blocked_by issue → issue is blocking related_issue
+        categorized.blocking.add(rel.issueId);
+      }
+    } else if (rel.relationType === "duplicate") {
+      if (rel.issueId === issueId) {
+        categorized.duplicate.add(rel.relatedIssueId);
+      } else {
+        categorized.duplicate.add(rel.issueId);
+      }
+    } else if (rel.relationType === "relates_to") {
+      if (rel.issueId === issueId) {
+        categorized.relates_to.add(rel.relatedIssueId);
+      } else {
+        categorized.relates_to.add(rel.issueId);
+      }
+    } else if (rel.relationType === "start_before") {
+      if (rel.issueId === issueId) {
+        categorized.start_before.add(rel.relatedIssueId);
+      } else {
+        categorized.start_after.add(rel.issueId);
+      }
+    } else if (rel.relationType === "finish_before") {
+      if (rel.issueId === issueId) {
+        categorized.finish_before.add(rel.relatedIssueId);
+      } else {
+        categorized.finish_after.add(rel.issueId);
+      }
+    } else if (rel.relationType === "implemented_by") {
+      if (rel.issueId === issueId) {
+        categorized.implemented_by.add(rel.relatedIssueId);
+      } else {
+        categorized.implements.add(rel.issueId);
+      }
+    }
+  }
+
+  // Collect all unique issue IDs we need to fetch
+  const allIssueIds = new Set<string>();
+  for (const ids of Object.values(categorized)) {
+    for (const id of ids) allIssueIds.add(id);
+  }
+
+  if (allIssueIds.size === 0) {
+    return c.json({
+      blocking: [], blocked_by: [], duplicate: [], relates_to: [],
+      start_after: [], start_before: [], finish_after: [], finish_before: [],
+      implements: [], implemented_by: [],
+    });
+  }
+
+  const idsArray = Array.from(allIssueIds);
+
+  // Fetch all related issues
+  const relatedIssues = await db
+    .select()
+    .from(issues)
+    .where(sql`${issues.id} IN (${sql.join(idsArray.map((id) => sql`${id}`), sql`, `)})`);
+
+  const issueMap = new Map(relatedIssues.map((i) => [i.id, i]));
+
+  // Fetch assignees for all related issues
+  const assignees = await db
+    .select({ issueId: issueAssignees.issueId, assigneeId: issueAssignees.assigneeId })
+    .from(issueAssignees)
+    .where(sql`${issueAssignees.issueId} IN (${sql.join(idsArray.map((id) => sql`${id}`), sql`, `)})`);
+
+  const assigneeMap = new Map<string, string[]>();
+  for (const a of assignees) {
+    if (!assigneeMap.has(a.issueId)) assigneeMap.set(a.issueId, []);
+    assigneeMap.get(a.issueId)!.push(a.assigneeId);
+  }
+
+  // Fetch labels for all related issues
+  const labelRows = await db
+    .select({ issueId: issueLabels.issueId, labelId: issueLabels.labelId })
+    .from(issueLabels)
+    .where(sql`${issueLabels.issueId} IN (${sql.join(idsArray.map((id) => sql`${id}`), sql`, `)})`);
+
+  const labelMap = new Map<string, string[]>();
+  for (const l of labelRows) {
+    if (!labelMap.has(l.issueId)) labelMap.set(l.issueId, []);
+    labelMap.get(l.issueId)!.push(l.labelId);
+  }
+
+  // Build response
+  const response: Record<string, unknown[]> = {};
+  for (const [relType, issueIdSet] of Object.entries(categorized)) {
+    response[relType] = Array.from(issueIdSet)
+      .map((id) => {
+        const issue = issueMap.get(id);
+        if (!issue) return null;
+        return formatRelatedIssue(
+          issue,
+          relType,
+          assigneeMap.get(id) ?? [],
+          labelMap.get(id) ?? [],
+        );
+      })
+      .filter(Boolean);
+  }
+
+  return c.json(response);
 });
 
-// POST /:issueId/issue-relation/ - Create relation
+// POST /:issueId/issue-relation/ - Create relations (bulk)
 issueRoutes.post("/:issueId/issue-relation/", requireProjectMember, zValidator("json", createRelationSchema), async (c) => {
+  const user = c.get("user")!;
   const issueId = c.req.param("issueId");
   const body = c.req.valid("json");
+  const { relation_type, issues: relatedIssueIds } = body;
 
-  // Check if relation already exists
-  const existing = await db.query.issueRelations.findFirst({
-    where: and(
-      eq(issueRelations.issueId, issueId),
-      eq(issueRelations.relatedIssueId, body.related_issue_id),
-      eq(issueRelations.relationType, body.relation_type)
+  const actualRelationType = getActualRelation(relation_type);
+  const reversed = isReversedRelation(relation_type);
+
+  const created: (typeof issueRelations.$inferSelect)[] = [];
+
+  for (const relatedId of relatedIssueIds) {
+    const srcIssueId = reversed ? relatedId : issueId;
+    const dstIssueId = reversed ? issueId : relatedId;
+
+    // Check if relation already exists
+    const existing = await db.query.issueRelations.findFirst({
+      where: and(
+        eq(issueRelations.issueId, srcIssueId),
+        eq(issueRelations.relatedIssueId, dstIssueId),
+      ),
+    });
+
+    if (!existing) {
+      const [result] = await db
+        .insert(issueRelations)
+        .values({
+          issueId: srcIssueId,
+          relatedIssueId: dstIssueId,
+          relationType: actualRelationType,
+        })
+        .returning();
+      created.push(result);
+    }
+  }
+
+  // Record activity
+  await db.insert(issueActivities).values({
+    issueId,
+    projectId: c.get("project")!.id,
+    workspaceId: c.get("workspace")!.id,
+    actorId: user.id,
+    field: "relation",
+    oldValue: null,
+    newValue: relation_type,
+    verb: "created",
+    comment: `added ${relation_type} relation`,
+  });
+
+  // Return the created relations in serialized form
+  const result = created.map(formatRelation);
+  return c.json(result, 201);
+});
+
+// POST /:issueId/remove-relation/ - Remove a relation (Django-compatible endpoint)
+issueRoutes.post("/:issueId/remove-relation/", requireProjectMember, zValidator("json", removeRelationSchema), async (c) => {
+  const user = c.get("user")!;
+  const issueId = c.req.param("issueId");
+  const body = c.req.valid("json");
+  const { related_issue, relation_type } = body;
+
+  // Find the relation in either direction
+  const relation = await db.query.issueRelations.findFirst({
+    where: or(
+      and(
+        eq(issueRelations.issueId, related_issue),
+        eq(issueRelations.relatedIssueId, issueId),
+      ),
+      and(
+        eq(issueRelations.issueId, issueId),
+        eq(issueRelations.relatedIssueId, related_issue),
+      ),
     ),
   });
 
-  if (existing) {
-    return c.json(formatRelation(existing));
+  if (!relation) {
+    return c.json({ detail: "Relation not found." }, 404);
   }
 
-  const result = await db
-    .insert(issueRelations)
-    .values({
-      issueId,
-      relatedIssueId: body.related_issue_id,
-      relationType: body.relation_type,
-    })
-    .returning();
+  await db.delete(issueRelations).where(eq(issueRelations.id, relation.id));
 
-  return c.json(formatRelation(result[0]!), 201);
+  // Record activity
+  await db.insert(issueActivities).values({
+    issueId,
+    projectId: c.get("project")!.id,
+    workspaceId: c.get("workspace")!.id,
+    actorId: user.id,
+    field: "relation",
+    oldValue: relation_type,
+    newValue: null,
+    verb: "deleted",
+    comment: `removed ${relation_type} relation`,
+  });
+
+  return new Response(null, { status: 204 });
 });
 
-// DELETE /:issueId/issue-relation/:relationId/ - Remove relation
+// DELETE /:issueId/issue-relation/:relationId/ - Remove relation (legacy endpoint)
 issueRoutes.delete("/:issueId/issue-relation/:relationId/", requireProjectMember, async (c) => {
   const relationId = c.req.param("relationId");
 

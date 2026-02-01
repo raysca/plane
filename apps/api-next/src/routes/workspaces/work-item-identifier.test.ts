@@ -31,7 +31,7 @@ app.use("*", async (c, next) => {
   if (!uid) return c.json({ detail: "Auth required" }, 401);
   c.set("user", { id: uid, email: "test@test.com", name: "Test" });
   c.set("session", { id: "s", userId: uid, expiresAt: new Date() });
-  c.set("workspace", { id: workspaceId, name: "Test WS", slug: "test-ws", ownerId: userId });
+  c.set("workspace", { id: workspaceId, name: "WII WS", slug: "wii-test-ws", ownerId: userId });
   c.set("workspaceMembership", { id: "wm", workspaceId, userId: uid, role: 20 });
   await next();
 });
@@ -218,7 +218,7 @@ describe("Work Item by Identifier Endpoint", () => {
       { id: guestUserId, email: "wii-guest@test.com", name: "WII Guest", emailVerified: true },
       { id: nonMemberUserId, email: "wii-nonmember@test.com", name: "WII NonMember", emailVerified: true },
     ]);
-    await db.insert(workspaces).values({ id: workspaceId, name: "Test WS", slug: "test-ws", ownerId: userId });
+    await db.insert(workspaces).values({ id: workspaceId, name: "WII WS", slug: "wii-test-ws", ownerId: userId });
     await db.insert(workspaceMembers).values([
       { id: createId(), workspaceId, userId, role: 20 },
       { id: createId(), workspaceId, userId: guestUserId, role: 5 },
@@ -282,7 +282,7 @@ describe("Work Item by Identifier Endpoint", () => {
   });
 
   test("returns issue by identifier (TEST-2)", async () => {
-    const res = await app.request("/api/workspaces/test-ws/work-items/TEST-2/", { headers: h() });
+    const res = await app.request("/api/workspaces/wii-test-ws/work-items/TEST-2/", { headers: h() });
     expect(res.status).toBe(200);
     const data = await res.json();
 
@@ -299,7 +299,7 @@ describe("Work Item by Identifier Endpoint", () => {
   });
 
   test("returns correct relation counts", async () => {
-    const res = await app.request("/api/workspaces/test-ws/work-items/TEST-2/", { headers: h() });
+    const res = await app.request("/api/workspaces/wii-test-ws/work-items/TEST-2/", { headers: h() });
     const data = await res.json();
 
     expect(data.assignee_ids).toContain(userId);
@@ -312,14 +312,14 @@ describe("Work Item by Identifier Endpoint", () => {
   });
 
   test("case-insensitive project identifier", async () => {
-    const res = await app.request("/api/workspaces/test-ws/work-items/test-2/", { headers: h() });
+    const res = await app.request("/api/workspaces/wii-test-ws/work-items/test-2/", { headers: h() });
     expect(res.status).toBe(200);
     const data = await res.json();
     expect(data.id).toBe(issueId);
   });
 
   test("expand=issue_reactions returns reactions", async () => {
-    const res = await app.request("/api/workspaces/test-ws/work-items/TEST-2/?expand=issue_reactions", { headers: h() });
+    const res = await app.request("/api/workspaces/wii-test-ws/work-items/TEST-2/?expand=issue_reactions", { headers: h() });
     const data = await res.json();
 
     expect(data.issue_reactions).toBeDefined();
@@ -329,7 +329,7 @@ describe("Work Item by Identifier Endpoint", () => {
   });
 
   test("expand=issue_link returns links", async () => {
-    const res = await app.request("/api/workspaces/test-ws/work-items/TEST-2/?expand=issue_link", { headers: h() });
+    const res = await app.request("/api/workspaces/wii-test-ws/work-items/TEST-2/?expand=issue_link", { headers: h() });
     const data = await res.json();
 
     expect(data.issue_link).toBeDefined();
@@ -339,7 +339,7 @@ describe("Work Item by Identifier Endpoint", () => {
   });
 
   test("expand=issue_attachments returns attachments", async () => {
-    const res = await app.request("/api/workspaces/test-ws/work-items/TEST-2/?expand=issue_attachments", { headers: h() });
+    const res = await app.request("/api/workspaces/wii-test-ws/work-items/TEST-2/?expand=issue_attachments", { headers: h() });
     const data = await res.json();
 
     expect(data.issue_attachments).toBeDefined();
@@ -348,7 +348,7 @@ describe("Work Item by Identifier Endpoint", () => {
   });
 
   test("expand=parent returns parent issue", async () => {
-    const res = await app.request("/api/workspaces/test-ws/work-items/TEST-2/?expand=parent", { headers: h() });
+    const res = await app.request("/api/workspaces/wii-test-ws/work-items/TEST-2/?expand=parent", { headers: h() });
     const data = await res.json();
 
     expect(data.parent).toBeDefined();
@@ -358,7 +358,7 @@ describe("Work Item by Identifier Endpoint", () => {
   });
 
   test("expand=multiple fields works", async () => {
-    const res = await app.request("/api/workspaces/test-ws/work-items/TEST-2/?expand=issue_reactions,issue_link,issue_attachments,parent", { headers: h() });
+    const res = await app.request("/api/workspaces/wii-test-ws/work-items/TEST-2/?expand=issue_reactions,issue_link,issue_attachments,parent", { headers: h() });
     const data = await res.json();
 
     expect(data.issue_reactions.length).toBe(1);
@@ -368,37 +368,37 @@ describe("Work Item by Identifier Endpoint", () => {
   });
 
   test("returns 400 for invalid identifier (no dash)", async () => {
-    const res = await app.request("/api/workspaces/test-ws/work-items/NODASH/", { headers: h() });
+    const res = await app.request("/api/workspaces/wii-test-ws/work-items/NODASH/", { headers: h() });
     expect(res.status).toBe(400);
   });
 
   test("returns 400 for non-numeric sequence", async () => {
-    const res = await app.request("/api/workspaces/test-ws/work-items/TEST-abc/", { headers: h() });
+    const res = await app.request("/api/workspaces/wii-test-ws/work-items/TEST-abc/", { headers: h() });
     expect(res.status).toBe(400);
   });
 
   test("returns 404 for non-existent project", async () => {
-    const res = await app.request("/api/workspaces/test-ws/work-items/NOPE-1/", { headers: h() });
+    const res = await app.request("/api/workspaces/wii-test-ws/work-items/NOPE-1/", { headers: h() });
     expect(res.status).toBe(404);
   });
 
   test("returns 404 for non-existent sequence", async () => {
-    const res = await app.request("/api/workspaces/test-ws/work-items/TEST-999/", { headers: h() });
+    const res = await app.request("/api/workspaces/wii-test-ws/work-items/TEST-999/", { headers: h() });
     expect(res.status).toBe(404);
   });
 
   test("returns 403 for non-project member", async () => {
-    const res = await app.request("/api/workspaces/test-ws/work-items/TEST-2/", { headers: h(nonMemberUserId) });
+    const res = await app.request("/api/workspaces/wii-test-ws/work-items/TEST-2/", { headers: h(nonMemberUserId) });
     expect(res.status).toBe(403);
   });
 
   test("returns 401 without auth", async () => {
-    const res = await app.request("/api/workspaces/test-ws/work-items/TEST-2/");
+    const res = await app.request("/api/workspaces/wii-test-ws/work-items/TEST-2/");
     expect(res.status).toBe(401);
   });
 
   test("is_subscribed is false for non-subscriber", async () => {
-    const res = await app.request("/api/workspaces/test-ws/work-items/TEST-2/", { headers: h(guestUserId) });
+    const res = await app.request("/api/workspaces/wii-test-ws/work-items/TEST-2/", { headers: h(guestUserId) });
     // Guest can view because the issue was created by userId but guest can still see it
     // since guestViewAllFeatures defaults to false and createdById !== guestUserId
     // Actually guest role=5, guestViewAllFeatures is falsy, and createdById is userId not guestUserId → 403

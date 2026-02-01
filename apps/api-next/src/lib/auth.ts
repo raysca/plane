@@ -196,8 +196,9 @@ export const auth = betterAuth({
   // Trusted origins for CORS
   trustedOrigins: [
     process.env.FRONTEND_URL || "http://localhost:3001",
-    "http://localhost:3001",
-    "http://localhost:4000",
+    ...(process.env.NODE_ENV !== "production"
+      ? ["http://localhost:3001", "http://localhost:4000"]
+      : []),
   ],
 });
 

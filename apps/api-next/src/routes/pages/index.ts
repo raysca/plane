@@ -554,45 +554,47 @@ pageRoutes.delete("/:pageId/", async (c) => {
     return c.json({ error: "Only admin or owner can delete the page" }, 403);
   }
 
-  // Remove parent from children
-  await db
-    .update(pages)
-    .set({ parentId: null })
-    .where(
-      and(
-        eq(pages.parentId, pageId),
-        eq(pages.workspaceId, workspace.id),
-        eq(pages.projectId, project.id)
-      )
-    );
+  await db.transaction(async (tx) => {
+    // Remove parent from children
+    await tx
+      .update(pages)
+      .set({ parentId: null })
+      .where(
+        and(
+          eq(pages.parentId, pageId),
+          eq(pages.workspaceId, workspace.id),
+          eq(pages.projectId, project.id)
+        )
+      );
 
-  // Delete the page
-  await db.delete(pages).where(eq(pages.id, pageId));
+    // Delete the page
+    await tx.delete(pages).where(eq(pages.id, pageId));
 
-  // Delete favorites referencing this page
-  await db.delete(pageFavorites).where(eq(pageFavorites.pageId, pageId));
+    // Delete favorites referencing this page
+    await tx.delete(pageFavorites).where(eq(pageFavorites.pageId, pageId));
 
-  // Delete from favorites table (workspace-level)
-  await db
-    .delete(favorites)
-    .where(
-      and(
-        eq(favorites.entityType, "page"),
-        eq(favorites.entityId, pageId),
-        eq(favorites.workspaceId, workspace.id)
-      )
-    );
+    // Delete from favorites table (workspace-level)
+    await tx
+      .delete(favorites)
+      .where(
+        and(
+          eq(favorites.entityType, "page"),
+          eq(favorites.entityId, pageId),
+          eq(favorites.workspaceId, workspace.id)
+        )
+      );
 
-  // Delete recent visits
-  await db
-    .delete(recentVisits)
-    .where(
-      and(
-        eq(recentVisits.entityType, "page"),
-        eq(recentVisits.entityId, pageId),
-        eq(recentVisits.workspaceId, workspace.id)
-      )
-    );
+    // Delete recent visits
+    await tx
+      .delete(recentVisits)
+      .where(
+        and(
+          eq(recentVisits.entityType, "page"),
+          eq(recentVisits.entityId, pageId),
+          eq(recentVisits.workspaceId, workspace.id)
+        )
+      );
+  });
 
   return c.body(null, 204);
 });
@@ -740,7 +742,13 @@ pageRoutes.delete("/:pageId/archive/", async (c) => {
 pageRoutes.post("/:pageId/lock/", async (c) => {
   const project = c.get("project")!;
   const workspace = c.get("workspace")!;
+  const membership = c.get("projectMembership");
+  const role = membership?.role ?? null;
   const pageId = c.req.param("pageId");
+
+  if (!canModifyPage(role)) {
+    return c.json({ error: "You do not have permission to lock this page" }, 403);
+  }
 
   const page = await db.query.pages.findFirst({
     where: and(
@@ -765,7 +773,13 @@ pageRoutes.post("/:pageId/lock/", async (c) => {
 pageRoutes.delete("/:pageId/lock/", async (c) => {
   const project = c.get("project")!;
   const workspace = c.get("workspace")!;
+  const membership = c.get("projectMembership");
+  const role = membership?.role ?? null;
   const pageId = c.req.param("pageId");
+
+  if (!canModifyPage(role)) {
+    return c.json({ error: "You do not have permission to unlock this page" }, 403);
+  }
 
   const page = await db.query.pages.findFirst({
     where: and(
@@ -865,6 +879,8 @@ pageRoutes.patch(
     const user = c.get("user")!;
     const project = c.get("project")!;
     const workspace = c.get("workspace")!;
+    const membership = c.get("projectMembership");
+    const role = membership?.role ?? null;
     const pageId = c.req.param("pageId");
 
     const page = await db.query.pages.findFirst({
@@ -878,6 +894,11 @@ pageRoutes.patch(
 
     if (!page) {
       return c.json({ error: "Page not found" }, 404);
+    }
+
+    // Only owner or members+ can edit page descriptions
+    if (page.ownedById !== user.id && !canModifyPage(role)) {
+      return c.json({ error: "You do not have permission to edit this page" }, 403);
     }
 
     if (page.isLocked) {
@@ -1037,6 +1058,120 @@ pageRoutes.post("/:pageId/duplicate/", async (c) => {
   return c.json(result, 201);
 });
 
+// =====================
+// MOVE PAGE TO ANOTHER PROJECT
+// =====================
+pageRoutes.post("/:pageId/move/", async (c) => {
+  const user = c.get("user")!;
+  const project = c.get("project")!;
+  const workspace = c.get("workspace")!;
+  const pageId = c.req.param("pageId");
+  const role = c.get("projectMembership")?.role ?? null;
+
+  if (!canModifyPage(role)) {
+    return c.json({ detail: "You do not have permission to perform this action." }, 403);
+  }
+
+  const page = await db.query.pages.findFirst({
+    where: and(
+      eq(pages.id, pageId),
+      eq(pages.workspaceId, workspace.id),
+      eq(pages.projectId, project.id)
+    ),
+  });
+
+  if (!page) {
+    return c.json({ error: "Page not found" }, 404);
+  }
+
+  const body = await c.req.json<{ new_project_id: string }>();
+  if (!body.new_project_id) {
+    return c.json({ error: "new_project_id is required" }, 400);
+  }
+
+  // Verify target project exists in the same workspace
+  const targetProject = await db.query.projects.findFirst({
+    where: and(
+      eq(projects.id, body.new_project_id),
+      eq(projects.workspaceId, workspace.id)
+    ),
+  });
+
+  if (!targetProject) {
+    return c.json({ error: "Target project not found" }, 404);
+  }
+
+  // Move page and all descendants
+  await movePageAndDescendants(pageId, body.new_project_id);
+
+  return c.body(null, 204);
+});
+
+// =====================
+// RESTORE PAGE VERSION
+// =====================
+pageRoutes.post("/:pageId/versions/:versionId/restore/", async (c) => {
+  const user = c.get("user")!;
+  const project = c.get("project")!;
+  const workspace = c.get("workspace")!;
+  const pageId = c.req.param("pageId");
+  const versionId = c.req.param("versionId");
+  const role = c.get("projectMembership")?.role ?? null;
+
+  if (!canModifyPage(role)) {
+    return c.json({ detail: "You do not have permission to perform this action." }, 403);
+  }
+
+  const page = await db.query.pages.findFirst({
+    where: and(
+      eq(pages.id, pageId),
+      eq(pages.workspaceId, workspace.id),
+      eq(pages.projectId, project.id)
+    ),
+  });
+
+  if (!page) {
+    return c.json({ error: "Page not found" }, 404);
+  }
+
+  if (page.isLocked) {
+    return c.json({ error_code: 4001, error_message: "PAGE_LOCKED" }, 400);
+  }
+
+  if (page.archivedAt) {
+    return c.json({ error_code: 4002, error_message: "PAGE_ARCHIVED" }, 400);
+  }
+
+  const version = await db.query.pageVersions.findFirst({
+    where: and(eq(pageVersions.id, versionId), eq(pageVersions.pageId, pageId)),
+  });
+
+  if (!version) {
+    return c.json({ error: "Version not found" }, 404);
+  }
+
+  // Create a new version snapshot of current state before restoring
+  await db.insert(pageVersions).values({
+    pageId,
+    descriptionHtml: page.descriptionHtml,
+    descriptionStripped: page.descriptionStripped,
+    ownedById: user.id,
+    lastSavedAt: new Date(),
+  });
+
+  // Restore the page description from the version
+  await db
+    .update(pages)
+    .set({
+      descriptionHtml: version.descriptionHtml,
+      descriptionStripped: version.descriptionStripped,
+      updatedAt: new Date(),
+    })
+    .where(eq(pages.id, pageId));
+
+  return c.json({ message: "Version restored successfully" });
+});
+
 // --- Helper: archive/unarchive page and descendants recursively ---
 async function archivePageAndDescendants(pageId: string, archivedAt: Date | null) {
   // Update the page itself
@@ -1054,4 +1189,256 @@ async function archivePageAndDescendants(pageId: string, archivedAt: Date | null
   }
 }
 
-export { pageRoutes };
+// --- Helper: move page and descendants to a new project ---
+async function movePageAndDescendants(pageId: string, newProjectId: string) {
+  await db.update(pages).set({ projectId: newProjectId, updatedAt: new Date() }).where(eq(pages.id, pageId));
+
+  const children = await db
+    .select({ id: pages.id })
+    .from(pages)
+    .where(eq(pages.parentId, pageId));
+
+  for (const child of children) {
+    await movePageAndDescendants(child.id, newProjectId);
+  }
+}
+
+// =====================
+// FAVORITE PAGES ROUTES (separate path: /favorite-pages/:pageId/)
+// These match the frontend's expected URL pattern
+// =====================
+const pageFavoriteRoutes = new Hono<{ Variables: Variables }>();
+pageFavoriteRoutes.use("*", authMiddleware);
+pageFavoriteRoutes.use("*", workspaceMiddleware);
+pageFavoriteRoutes.use("*", projectMiddleware);
+
+// GET /favorite-pages/ - List all favorite pages
+pageFavoriteRoutes.get("/", async (c) => {
+  const user = c.get("user")!;
+  const project = c.get("project")!;
+  const workspace = c.get("workspace")!;
+
+  const userFavs = await db
+    .select({ pageId: pageFavorites.pageId })
+    .from(pageFavorites)
+    .where(eq(pageFavorites.userId, user.id));
+
+  if (userFavs.length === 0) {
+    return c.json([]);
+  }
+
+  const favPageIds = userFavs.map((f) => f.pageId);
+
+  const favPages = await db
+    .select()
+    .from(pages)
+    .where(
+      and(
+        eq(pages.workspaceId, workspace.id),
+        eq(pages.projectId, project.id),
+        sql`${pages.id} IN (${sql.join(
+          favPageIds.map((id) => sql`${id}`),
+          sql`, `
+        )})`,
+        or(eq(pages.ownedById, user.id), eq(pages.accessLevel, 0))
+      )
+    )
+    .orderBy(desc(pages.createdAt));
+
+  // Get labels for all pages
+  const pageIds = favPages.map((p) => p.id);
+  let allLabels: { pageId: string; labelId: string }[] = [];
+  if (pageIds.length > 0) {
+    allLabels = await db
+      .select({ pageId: pageLabels.pageId, labelId: pageLabels.labelId })
+      .from(pageLabels)
+      .where(
+        sql`${pageLabels.pageId} IN (${sql.join(
+          pageIds.map((id) => sql`${id}`),
+          sql`, `
+        )})`
+      );
+  }
+
+  const labelsByPage = new Map<string, string[]>();
+  for (const l of allLabels) {
+    if (!labelsByPage.has(l.pageId)) labelsByPage.set(l.pageId, []);
+    labelsByPage.get(l.pageId)!.push(l.labelId);
+  }
+
+  const result = favPages.map((p) =>
+    formatPage(p, {
+      isFavorite: true,
+      labelIds: labelsByPage.get(p.id) ?? [],
+      projectIds: [project.id],
+    })
+  );
+
+  return c.json(result);
+});
+
+// POST /favorite-pages/:pageId/ - Add page to favorites
+pageFavoriteRoutes.post("/:pageId/", async (c) => {
+  const user = c.get("user")!;
+  const project = c.get("project")!;
+  const pageId = c.req.param("pageId");
+  const role = c.get("projectMembership")?.role ?? null;
+
+  if (!canModifyPage(role)) {
+    return c.json({ detail: "You do not have permission to perform this action." }, 403);
+  }
+
+  const page = await db.query.pages.findFirst({
+    where: and(eq(pages.id, pageId), eq(pages.projectId, project.id)),
+  });
+  if (!page) {
+    return c.json({ error: "Page not found" }, 404);
+  }
+
+  const existing = await db.query.pageFavorites.findFirst({
+    where: and(eq(pageFavorites.pageId, pageId), eq(pageFavorites.userId, user.id)),
+  });
+
+  if (!existing) {
+    await db.insert(pageFavorites).values({
+      pageId,
+      userId: user.id,
+    });
+  }
+
+  return c.body(null, 204);
+});
+
+// DELETE /favorite-pages/:pageId/ - Remove page from favorites
+pageFavoriteRoutes.delete("/:pageId/", async (c) => {
+  const user = c.get("user")!;
+  const pageId = c.req.param("pageId");
+  const role = c.get("projectMembership")?.role ?? null;
+
+  if (!canModifyPage(role)) {
+    return c.json({ detail: "You do not have permission to perform this action." }, 403);
+  }
+
+  await db
+    .delete(pageFavorites)
+    .where(and(eq(pageFavorites.pageId, pageId), eq(pageFavorites.userId, user.id)));
+
+  return c.body(null, 204);
+});
+
+// =====================
+// ARCHIVED PAGES ROUTES (separate path: /archived-pages/)
+// =====================
+const archivedPageRoutes = new Hono<{ Variables: Variables }>();
+archivedPageRoutes.use("*", authMiddleware);
+archivedPageRoutes.use("*", workspaceMiddleware);
+archivedPageRoutes.use("*", projectMiddleware);
+
+// GET /archived-pages/ - List all archived pages
+archivedPageRoutes.get("/", async (c) => {
+  const user = c.get("user")!;
+  const project = c.get("project")!;
+  const workspace = c.get("workspace")!;
+  const projectMembership = c.get("projectMembership");
+
+  let archivedPages = await db
+    .select()
+    .from(pages)
+    .where(
+      and(
+        eq(pages.workspaceId, workspace.id),
+        eq(pages.projectId, project.id),
+        sql`${pages.archivedAt} IS NOT NULL`,
+        or(eq(pages.ownedById, user.id), eq(pages.accessLevel, 0))
+      )
+    )
+    .orderBy(desc(pages.createdAt));
+
+  // Guest restriction
+  if (projectMembership?.role === ROLES.GUEST) {
+    const guestViewAll = await getGuestViewAllFeatures(project.id);
+    if (!guestViewAll) {
+      archivedPages = archivedPages.filter((p) => p.ownedById === user.id);
+    }
+  }
+
+  // Get favorites
+  const userFavorites = await db
+    .select({ pageId: pageFavorites.pageId })
+    .from(pageFavorites)
+    .where(eq(pageFavorites.userId, user.id));
+  const favoriteSet = new Set(userFavorites.map((f) => f.pageId));
+
+  // Get labels
+  const pageIds = archivedPages.map((p) => p.id);
+  let allLabels: { pageId: string; labelId: string }[] = [];
+  if (pageIds.length > 0) {
+    allLabels = await db
+      .select({ pageId: pageLabels.pageId, labelId: pageLabels.labelId })
+      .from(pageLabels)
+      .where(
+        sql`${pageLabels.pageId} IN (${sql.join(
+          pageIds.map((id) => sql`${id}`),
+          sql`, `
+        )})`
+      );
+  }
+
+  const labelsByPage = new Map<string, string[]>();
+  for (const l of allLabels) {
+    if (!labelsByPage.has(l.pageId)) labelsByPage.set(l.pageId, []);
+    labelsByPage.get(l.pageId)!.push(l.labelId);
+  }
+
+  const result = archivedPages.map((p) =>
+    formatPage(p, {
+      isFavorite: favoriteSet.has(p.id),
+      labelIds: labelsByPage.get(p.id) ?? [],
+      projectIds: [project.id],
+    })
+  );
+
+  return c.json(result);
+});
+
+// Pages summary route (separate path: /pages-summary/)
+const pageSummaryRoutes = new Hono<{ Variables: Variables }>();
+pageSummaryRoutes.use("*", authMiddleware);
+pageSummaryRoutes.use("*", workspaceMiddleware);
+pageSummaryRoutes.use("*", projectMiddleware);
+
+pageSummaryRoutes.get("/", async (c) => {
+  const user = c.get("user")!;
+  const project = c.get("project")!;
+  const workspace = c.get("workspace")!;
+  const projectMembership = c.get("projectMembership");
+
+  let allPages = await db
+    .select()
+    .from(pages)
+    .where(
+      and(
+        eq(pages.workspaceId, workspace.id),
+        eq(pages.projectId, project.id),
+        isNull(pages.parentId),
+        or(eq(pages.ownedById, user.id), eq(pages.accessLevel, 0))
+      )
+    );
+
+  if (projectMembership?.role === ROLES.GUEST) {
+    const guestViewAll = await getGuestViewAllFeatures(project.id);
+    if (!guestViewAll) {
+      allPages = allPages.filter((p) => p.ownedById === user.id);
+    }
+  }
+
+  const stats = {
+    public_pages: allPages.filter((p) => p.accessLevel === 0 && !p.archivedAt).length,
+    private_pages: allPages.filter((p) => p.accessLevel === 1 && !p.archivedAt).length,
+    archived_pages: allPages.filter((p) => p.archivedAt !== null).length,
+  };
+
+  return c.json(stats);
+});
+
+export { pageRoutes, pageFavoriteRoutes, archivedPageRoutes, pageSummaryRoutes };

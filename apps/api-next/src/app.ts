@@ -16,7 +16,7 @@ import { workspaceSlugCheckRoutes } from "./routes/workspace-slug-check";
 import { externalRoutes } from "./routes/external";
 import { assetRoutes } from "./routes/assets";
 import { timezoneRoutes } from "./routes/timezones";
-import { pageRoutes } from "./routes/pages";
+import { pageRoutes, pageFavoriteRoutes, archivedPageRoutes, pageSummaryRoutes } from "./routes/pages";
 import { intakeRoutes } from "./routes/intake";
 
 
@@ -82,9 +82,9 @@ app.use(
   cors({
     origin: [
       process.env.FRONTEND_URL || "http://localhost:3000",
-      "http://localhost:3001",
-      "http://127.0.0.1:3001",
-      "http://localhost:4000",
+      ...(process.env.NODE_ENV !== "production"
+        ? ["http://localhost:3001", "http://127.0.0.1:3001", "http://localhost:4000"]
+        : []),
     ],
     credentials: true,
     allowHeaders: ["Content-Type", "Authorization", "X-API-Key", "X-CSRFTOKEN"],
@@ -116,6 +116,9 @@ app.route("/api/workspaces/", workspaceRoutes);
 app.route("/api/workspaces/:slug/projects/", projectRoutes);
 app.route("/api/workspaces/:slug/projects/:projectId/issues/", issueRoutes);
 app.route("/api/workspaces/:slug/projects/:projectId/pages/", pageRoutes);
+app.route("/api/workspaces/:slug/projects/:projectId/favorite-pages/", pageFavoriteRoutes);
+app.route("/api/workspaces/:slug/projects/:projectId/archived-pages/", archivedPageRoutes);
+app.route("/api/workspaces/:slug/projects/:projectId/pages-summary/", pageSummaryRoutes);
 app.route("/api/workspaces/:slug/projects/:projectId/inbox-issues/", intakeRoutes);
 app.route("/api/workspaces/:slug/projects/:projectId/intake-issues/", intakeRoutes);
 app.route("/api/workspace-slug-check/", workspaceSlugCheckRoutes);

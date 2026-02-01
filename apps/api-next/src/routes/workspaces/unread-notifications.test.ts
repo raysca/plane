@@ -172,6 +172,8 @@ beforeAll(async () => {
       read_at INTEGER,
       archived_at INTEGER,
       snoozed_till INTEGER,
+      created_by_id TEXT REFERENCES users(id),
+      updated_by_id TEXT REFERENCES users(id),
       created_at INTEGER,
       updated_at INTEGER
     );

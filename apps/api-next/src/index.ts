@@ -1,5 +1,10 @@
 import type { ServerWebSocket, Server } from "bun";
 import { app } from "./app";
+import { auth } from "./lib/auth";
+import { db } from "./db";
+import { workspaceMembers } from "./db/schema/workspace";
+import { projectMembers } from "./db/schema/project";
+import { eq, and } from "drizzle-orm";
 import admin from './admin/index.html'
 
 // WebSocket data interface
@@ -18,11 +23,6 @@ const websocketHandler = {
   open(ws: ServerWebSocket<WebSocketData>) {
     const clientId = crypto.randomUUID();
     clients.set(clientId, ws);
-    ws.data = {
-      userId: null,
-      subscriptions: new Set(),
-      connectedAt: Date.now(),
-    };
 
     ws.send(
       JSON.stringify({
@@ -31,8 +31,6 @@ const websocketHandler = {
         timestamp: Date.now(),
       })
     );
-
-    console.log(`WebSocket client connected: ${clientId}`);
   },
 
   message(ws: ServerWebSocket<WebSocketData>, message: string | Buffer) {
@@ -91,7 +89,6 @@ const websocketHandler = {
     for (const [clientId, client] of clients) {
       if (client === ws) {
         clients.delete(clientId);
-        console.log(`WebSocket client disconnected: ${clientId}`);
         break;
       }
     }
@@ -102,20 +99,55 @@ const websocketHandler = {
   },
 };
 
-function handleAuthenticate(
+async function handleAuthenticate(
   ws: ServerWebSocket<WebSocketData>,
   data: { userId?: string; token?: string }
 ) {
-  // TODO: Validate token against Better Auth session
-  if (data.userId) {
-    ws.data.userId = data.userId;
+  // Validate the token against Better Auth session
+  if (!data.token) {
+    ws.send(
+      JSON.stringify({
+        type: "error",
+        message: "Authentication failed: token is required",
+      })
+    );
+    return;
+  }
+
+  try {
+    // Create a fake Request with the session cookie to validate via Better Auth
+    const headers = new Headers();
+    headers.set("cookie", `plane.session_token=${data.token}`);
+    const session = await auth.api.getSession({ headers });
+
+    if (!session || !session.user) {
+      ws.send(
+        JSON.stringify({
+          type: "error",
+          message: "Authentication failed: invalid or expired session",
+        })
+      );
+      return;
+    }
+
+    if (!session.user.isActive) {
+      ws.send(
+        JSON.stringify({
+          type: "error",
+          message: "Authentication failed: account is disabled",
+        })
+      );
+      return;
+    }
+
+    ws.data.userId = session.user.id;
     ws.send(
       JSON.stringify({
         type: "authenticated",
-        userId: data.userId,
+        userId: session.user.id,
       })
     );
-  } else {
+  } catch (error) {
     ws.send(
       JSON.stringify({
         type: "error",
@@ -125,24 +157,100 @@ function handleAuthenticate(
   }
 }
 
-function handleSubscribe(ws: ServerWebSocket<WebSocketData>, topic: string) {
+async function handleSubscribe(ws: ServerWebSocket<WebSocketData>, topic: string) {
   if (!topic) {
     ws.send(JSON.stringify({ type: "error", message: "Topic is required" }));
     return;
   }
 
-  // TODO: Validate topic access (check workspace/project membership)
+  // Require authentication before subscribing
+  if (!ws.data.userId) {
+    ws.send(
+      JSON.stringify({
+        type: "error",
+        message: "Authentication required before subscribing",
+      })
+    );
+    return;
+  }
+
+  // Validate topic access by checking membership
+  const authorized = await validateTopicAccess(ws.data.userId, topic);
+  if (!authorized) {
+    ws.send(
+      JSON.stringify({
+        type: "error",
+        message: "You do not have access to this topic",
+      })
+    );
+    return;
+  }
+
   ws.subscribe(topic);
   ws.data.subscriptions.add(topic);
 
   if (!topicSubscribers.has(topic)) {
     topicSubscribers.set(topic, new Set());
   }
-  if (ws.data.userId) {
-    topicSubscribers.get(topic)!.add(ws.data.userId);
-  }
+  topicSubscribers.get(topic)!.add(ws.data.userId);
 
   ws.send(JSON.stringify({ type: "subscribed", topic }));
+}
+
+/**
+ * Validate that a user has access to a topic by checking workspace/project membership.
+ * Topic format examples:
+ *   workspace:<workspaceId>
+ *   workspace:<workspaceId>:project:<projectId>
+ *   workspace:<workspaceId>:project:<projectId>:issue:<issueId>
+ *   user:<userId>
+ */
+async function validateTopicAccess(userId: string, topic: string): Promise<boolean> {
+  const parts = topic.split(":");
+
+  // user:<userId> - only the user themselves can subscribe
+  if (parts[0] === "user" && parts.length === 2) {
+    return parts[1] === userId;
+  }
+
+  // workspace:<workspaceId> topics - check workspace membership
+  if (parts[0] === "workspace" && parts.length >= 2) {
+    const workspaceId = parts[1];
+
+    const membership = await db.query.workspaceMembers.findFirst({
+      where: and(
+        eq(workspaceMembers.workspaceId, workspaceId),
+        eq(workspaceMembers.userId, userId),
+        eq(workspaceMembers.isActive, true)
+      ),
+    });
+
+    if (!membership) {
+      return false;
+    }
+
+    // workspace:<workspaceId>:project:<projectId> - check project membership
+    if (parts.length >= 4 && parts[2] === "project") {
+      const projectId = parts[3];
+
+      const projMembership = await db.query.projectMembers.findFirst({
+        where: and(
+          eq(projectMembers.projectId, projectId),
+          eq(projectMembers.memberId, userId),
+          eq(projectMembers.isActive, true)
+        ),
+      });
+
+      if (!projMembership) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  // Unknown topic format - deny by default
+  return false;
 }
 
 function handleUnsubscribe(ws: ServerWebSocket<WebSocketData>, topic: string) {
@@ -160,6 +268,15 @@ function handleUnsubscribe(ws: ServerWebSocket<WebSocketData>, topic: string) {
   ws.send(JSON.stringify({ type: "unsubscribed", topic }));
 }
 
+// Helper to extract session token from cookie header
+function extractSessionToken(req: Request): string | null {
+  const cookie = req.headers.get("cookie");
+  if (!cookie) return null;
+
+  const match = cookie.match(/plane\.session_token=([^;]+)/);
+  return match ? match[1] : null;
+}
+
 // Start server
 const port = parseInt(process.env.PORT || "8000");
 
@@ -167,29 +284,59 @@ const server = Bun.serve({
   port,
   routes: {
     '/admin': admin,
-    '/ws/*': (req: Request, server: Server<WebSocketData>) => {
-      const upgraded = server.upgrade(req, {
-        data: {
-          userId: null,
-          subscriptions: new Set(),
-          connectedAt: Date.now(),
-        },
-      });
-      if (upgraded) {
-        return undefined;
+    '/ws/*': async (req: Request, server: Server<WebSocketData>) => {
+      // Validate session cookie before allowing upgrade
+      const token = extractSessionToken(req);
+      if (!token) {
+        return new Response("Authentication required", { status: 401 });
+      }
+
+      try {
+        const session = await auth.api.getSession({ headers: req.headers });
+        if (!session || !session.user || !session.user.isActive) {
+          return new Response("Authentication required", { status: 401 });
+        }
+
+        const upgraded = server.upgrade(req, {
+          data: {
+            userId: session.user.id,
+            subscriptions: new Set(),
+            connectedAt: Date.now(),
+          },
+        });
+        if (upgraded) {
+          return undefined;
+        }
+      } catch {
+        return new Response("Authentication failed", { status: 401 });
       }
       return new Response("WebSocket upgrade failed", { status: 400 });
     },
-    '/realtime/*': (req: Request, server: Server<WebSocketData>) => {
-      const upgraded = server.upgrade(req, {
-        data: {
-          userId: null,
-          subscriptions: new Set(),
-          connectedAt: Date.now(),
-        },
-      });
-      if (upgraded) {
-        return undefined;
+    '/realtime/*': async (req: Request, server: Server<WebSocketData>) => {
+      // Validate session cookie before allowing upgrade
+      const token = extractSessionToken(req);
+      if (!token) {
+        return new Response("Authentication required", { status: 401 });
+      }
+
+      try {
+        const session = await auth.api.getSession({ headers: req.headers });
+        if (!session || !session.user || !session.user.isActive) {
+          return new Response("Authentication required", { status: 401 });
+        }
+
+        const upgraded = server.upgrade(req, {
+          data: {
+            userId: session.user.id,
+            subscriptions: new Set(),
+            connectedAt: Date.now(),
+          },
+        });
+        if (upgraded) {
+          return undefined;
+        }
+      } catch {
+        return new Response("Authentication failed", { status: 401 });
       }
       return new Response("WebSocket upgrade failed", { status: 400 });
     },

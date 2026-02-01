@@ -230,7 +230,7 @@ export const issueRelations = sqliteTable(
     relatedIssueId: text("related_issue_id")
       .notNull()
       .references(() => issues.id, { onDelete: "cascade" }),
-    relationType: text("relation_type").notNull(), // 'blocks', 'is_blocked_by', 'duplicate_of', 'relates_to'
+    relationType: text("relation_type").notNull(), // 'blocked_by', 'duplicate', 'relates_to', 'start_before', 'finish_before', 'implemented_by'
     createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
   },
   (table) => [

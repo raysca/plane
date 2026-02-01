@@ -17,6 +17,7 @@ const memberId = createId();
 const guestId = createId();
 const workspaceId = createId();
 const projectId = createId();
+const project2Id = createId();
 
 // Build test app with fake auth middleware
 const app = new Hono();
@@ -439,6 +440,145 @@ app.get("/pages/:pageId/versions/", async (c) => {
   })));
 });
 
+// MOVE PAGE
+app.post("/pages/:pageId/move/", async (c) => {
+  const user: any = c.get("user" as any);
+  const project: any = c.get("project" as any);
+  const workspace: any = c.get("workspace" as any);
+  const pageId = c.req.param("pageId");
+  const role = (c.get("projectMembership" as any) as any)?.role ?? null;
+
+  if (role === null || role < ROLES.MEMBER) return c.json({ detail: "You do not have permission to perform this action." }, 403);
+
+  const page = await db.query.pages.findFirst({
+    where: and(eq(pages.id, pageId), eq(pages.workspaceId, workspace.id), eq(pages.projectId, project.id)),
+  });
+  if (!page) return c.json({ error: "Page not found" }, 404);
+
+  const body = await c.req.json();
+  if (!body.new_project_id) return c.json({ error: "new_project_id is required" }, 400);
+
+  const targetProject = await db.query.projects.findFirst({
+    where: and(eq(projects.id, body.new_project_id), eq(projects.workspaceId, workspace.id)),
+  });
+  if (!targetProject) return c.json({ error: "Target project not found" }, 404);
+
+  async function movePageAndDescendants(pid: string, newPid: string) {
+    await db.update(pages).set({ projectId: newPid, updatedAt: new Date() }).where(eq(pages.id, pid));
+    const children = await db.select({ id: pages.id }).from(pages).where(eq(pages.parentId, pid));
+    for (const child of children) await movePageAndDescendants(child.id, newPid);
+  }
+
+  await movePageAndDescendants(pageId, body.new_project_id);
+  return new Response(null, { status: 204 });
+});
+
+// RESTORE VERSION
+app.post("/pages/:pageId/versions/:versionId/restore/", async (c) => {
+  const user: any = c.get("user" as any);
+  const project: any = c.get("project" as any);
+  const workspace: any = c.get("workspace" as any);
+  const pageId = c.req.param("pageId");
+  const versionId = c.req.param("versionId");
+  const role = (c.get("projectMembership" as any) as any)?.role ?? null;
+
+  if (role === null || role < ROLES.MEMBER) return c.json({ detail: "You do not have permission to perform this action." }, 403);
+
+  const page = await db.query.pages.findFirst({
+    where: and(eq(pages.id, pageId), eq(pages.workspaceId, workspace.id), eq(pages.projectId, project.id)),
+  });
+  if (!page) return c.json({ error: "Page not found" }, 404);
+  if (page.isLocked) return c.json({ error_code: 4001, error_message: "PAGE_LOCKED" }, 400);
+  if (page.archivedAt) return c.json({ error_code: 4002, error_message: "PAGE_ARCHIVED" }, 400);
+
+  const version = await db.query.pageVersions.findFirst({
+    where: and(eq(pageVersions.id, versionId), eq(pageVersions.pageId, pageId)),
+  });
+  if (!version) return c.json({ error: "Version not found" }, 404);
+
+  // Create snapshot of current state
+  await db.insert(pageVersions).values({
+    pageId,
+    descriptionHtml: page.descriptionHtml,
+    descriptionStripped: page.descriptionStripped,
+    ownedById: user.id,
+    lastSavedAt: new Date(),
+  });
+
+  // Restore from version
+  await db.update(pages).set({
+    descriptionHtml: version.descriptionHtml,
+    descriptionStripped: version.descriptionStripped,
+    updatedAt: new Date(),
+  }).where(eq(pages.id, pageId));
+
+  return c.json({ message: "Version restored successfully" });
+});
+
+// FAVORITE-PAGES (separate URL pattern matching frontend)
+app.get("/favorite-pages/", async (c) => {
+  const user: any = c.get("user" as any);
+  const project: any = c.get("project" as any);
+  const workspace: any = c.get("workspace" as any);
+
+  const userFavs = await db.select({ pageId: pageFavorites.pageId }).from(pageFavorites).where(eq(pageFavorites.userId, user.id));
+  if (userFavs.length === 0) return c.json([]);
+
+  const favPageIds = userFavs.map((f) => f.pageId);
+  const favPages = await db.select().from(pages).where(
+    and(
+      eq(pages.workspaceId, workspace.id),
+      eq(pages.projectId, project.id),
+      sql`${pages.id} IN (${sql.join(favPageIds.map((id) => sql`${id}`), sql`, `)})`,
+      or(eq(pages.ownedById, user.id), eq(pages.accessLevel, 0))
+    )
+  ).orderBy(desc(pages.createdAt));
+
+  return c.json(favPages.map((p) => formatPage(p, { isFavorite: true, labelIds: [], projectIds: [project.id] })));
+});
+
+app.post("/favorite-pages/:pageId/", async (c) => {
+  const user: any = c.get("user" as any);
+  const project: any = c.get("project" as any);
+  const pageId = c.req.param("pageId");
+  const role = (c.get("projectMembership" as any) as any)?.role ?? null;
+  if (role === null || role < ROLES.MEMBER) return c.json({ detail: "Forbidden" }, 403);
+
+  const page = await db.query.pages.findFirst({ where: and(eq(pages.id, pageId), eq(pages.projectId, project.id)) });
+  if (!page) return c.json({ error: "Page not found" }, 404);
+
+  const existing = await db.query.pageFavorites.findFirst({
+    where: and(eq(pageFavorites.pageId, pageId), eq(pageFavorites.userId, user.id)),
+  });
+  if (!existing) await db.insert(pageFavorites).values({ pageId, userId: user.id });
+  return new Response(null, { status: 204 });
+});
+
+app.delete("/favorite-pages/:pageId/", async (c) => {
+  const user: any = c.get("user" as any);
+  const pageId = c.req.param("pageId");
+  await db.delete(pageFavorites).where(and(eq(pageFavorites.pageId, pageId), eq(pageFavorites.userId, user.id)));
+  return new Response(null, { status: 204 });
+});
+
+// ARCHIVED-PAGES
+app.get("/archived-pages/", async (c) => {
+  const user: any = c.get("user" as any);
+  const project: any = c.get("project" as any);
+  const workspace: any = c.get("workspace" as any);
+
+  const archivedPages = await db.select().from(pages).where(
+    and(
+      eq(pages.workspaceId, workspace.id),
+      eq(pages.projectId, project.id),
+      sql`${pages.archivedAt} IS NOT NULL`,
+      or(eq(pages.ownedById, user.id), eq(pages.accessLevel, 0))
+    )
+  ).orderBy(desc(pages.createdAt));
+
+  return c.json(archivedPages.map((p) => formatPage(p, { isFavorite: false, labelIds: [], projectIds: [project.id] })));
+});
+
 // DUPLICATE
 app.post("/pages/:pageId/duplicate/", async (c) => {
   const user: any = c.get("user" as any);
@@ -501,10 +641,16 @@ beforeAll(async () => {
     { workspaceId, userId: guestId, role: 5 },
   ]).onConflictDoNothing();
 
-  await db.insert(projects).values({
-    id: projectId, workspaceId, name: "Test Project", identifier: `TST${projectId.slice(0, 4).toUpperCase()}`,
-    network: 2, createdById: adminId,
-  }).onConflictDoNothing();
+  await db.insert(projects).values([
+    {
+      id: projectId, workspaceId, name: "Test Project", identifier: `TST${projectId.slice(0, 4).toUpperCase()}`,
+      network: 2, createdById: adminId,
+    },
+    {
+      id: project2Id, workspaceId, name: "Test Project 2", identifier: `TS2${project2Id.slice(0, 4).toUpperCase()}`,
+      network: 2, createdById: adminId,
+    },
+  ]).onConflictDoNothing();
 
   await db.insert(projectMembers).values([
     { projectId, memberId: adminId, role: 20 },
@@ -525,7 +671,9 @@ afterAll(async () => {
   );
   await db.delete(pages).where(eq(pages.workspaceId, workspaceId));
   await db.delete(projectMembers).where(eq(projectMembers.projectId, projectId));
+  await db.delete(projectMembers).where(eq(projectMembers.projectId, project2Id));
   await db.delete(projects).where(eq(projects.id, projectId));
+  await db.delete(projects).where(eq(projects.id, project2Id));
   await db.delete(workspaceMembers).where(eq(workspaceMembers.workspaceId, workspaceId));
   await db.delete(workspaces).where(eq(workspaces.id, workspaceId));
   await db.delete(users).where(eq(users.id, adminId));
@@ -760,6 +908,232 @@ describe("Page Routes", () => {
       const res = await makeRequest("POST", `/pages/${createdPageId}/duplicate/`, memberId, undefined, ROLES.MEMBER);
       expect(res.status).toBe(403);
       await db.update(pages).set({ accessLevel: 0 }).where(eq(pages.id, createdPageId));
+    });
+  });
+
+  describe("POST /pages/:pageId/move/ - Move Page", () => {
+    let movePageId: string;
+
+    test("can move a page to another project", async () => {
+      // Create a page to move
+      const createRes = await makeRequest("POST", "/pages/", adminId, { name: "Page to Move" });
+      const created = await createRes.json();
+      movePageId = created.id;
+
+      const res = await makeRequest("POST", `/pages/${movePageId}/move/`, adminId, {
+        new_project_id: project2Id,
+      });
+      expect(res.status).toBe(204);
+
+      // Verify page is in the new project
+      const page = await db.query.pages.findFirst({ where: eq(pages.id, movePageId) });
+      expect(page?.projectId).toBe(project2Id);
+
+      // Clean up
+      await db.delete(pages).where(eq(pages.id, movePageId));
+    });
+
+    test("cannot move to non-existent project", async () => {
+      const createRes = await makeRequest("POST", "/pages/", adminId, { name: "Page to Move 2" });
+      const created = await createRes.json();
+      movePageId = created.id;
+
+      const res = await makeRequest("POST", `/pages/${movePageId}/move/`, adminId, {
+        new_project_id: createId(),
+      });
+      expect(res.status).toBe(404);
+
+      await db.delete(pages).where(eq(pages.id, movePageId));
+    });
+
+    test("guest cannot move a page", async () => {
+      const createRes = await makeRequest("POST", "/pages/", adminId, { name: "Page No Move" });
+      const created = await createRes.json();
+      movePageId = created.id;
+
+      const res = await makeRequest("POST", `/pages/${movePageId}/move/`, guestId, {
+        new_project_id: project2Id,
+      }, ROLES.GUEST);
+      expect(res.status).toBe(403);
+
+      await db.delete(pages).where(eq(pages.id, movePageId));
+    });
+
+    test("moves child pages along with parent", async () => {
+      const createRes = await makeRequest("POST", "/pages/", adminId, { name: "Parent to Move" });
+      const parent = await createRes.json();
+
+      // Create child directly
+      const [child] = await db.insert(pages).values({
+        name: "Child Page",
+        workspaceId,
+        projectId,
+        parentId: parent.id,
+        ownedById: adminId,
+        accessLevel: 0,
+      }).returning();
+
+      const res = await makeRequest("POST", `/pages/${parent.id}/move/`, adminId, {
+        new_project_id: project2Id,
+      });
+      expect(res.status).toBe(204);
+
+      const movedChild = await db.query.pages.findFirst({ where: eq(pages.id, child.id) });
+      expect(movedChild?.projectId).toBe(project2Id);
+
+      await db.delete(pages).where(eq(pages.id, child.id));
+      await db.delete(pages).where(eq(pages.id, parent.id));
+    });
+  });
+
+  describe("POST /pages/:pageId/versions/:versionId/restore/ - Restore Version", () => {
+    let restorePageId: string;
+    let versionId: string;
+
+    test("can restore a page version", async () => {
+      // Create page with initial description
+      const createRes = await makeRequest("POST", "/pages/", adminId, {
+        name: "Version Test Page",
+        description_html: "<p>Original</p>",
+      });
+      const created = await createRes.json();
+      restorePageId = created.id;
+
+      // Update description to create a version
+      await makeRequest("PATCH", `/pages/${restorePageId}/description/`, adminId, {
+        description_html: "<p>Version 1</p>",
+      });
+
+      // Get the version
+      const versionsRes = await makeRequest("GET", `/pages/${restorePageId}/versions/`, adminId);
+      const versions = await versionsRes.json();
+      expect(versions.length).toBeGreaterThanOrEqual(1);
+      versionId = versions[0].id;
+
+      // Update description again
+      await makeRequest("PATCH", `/pages/${restorePageId}/description/`, adminId, {
+        description_html: "<p>Version 2</p>",
+      });
+
+      // Restore the first version
+      const restoreRes = await makeRequest("POST", `/pages/${restorePageId}/versions/${versionId}/restore/`, adminId);
+      expect(restoreRes.status).toBe(200);
+      const data = await restoreRes.json();
+      expect(data.message).toBe("Version restored successfully");
+
+      // Verify page description was restored
+      const page = await db.query.pages.findFirst({ where: eq(pages.id, restorePageId) });
+      expect(page?.descriptionHtml).toBe("<p>Version 1</p>");
+
+      await db.delete(pageVersions).where(eq(pageVersions.pageId, restorePageId));
+      await db.delete(pages).where(eq(pages.id, restorePageId));
+    });
+
+    test("cannot restore version of locked page", async () => {
+      const createRes = await makeRequest("POST", "/pages/", adminId, { name: "Locked Restore" });
+      const created = await createRes.json();
+
+      await makeRequest("PATCH", `/pages/${created.id}/description/`, adminId, {
+        description_html: "<p>v1</p>",
+      });
+
+      const versionsRes = await makeRequest("GET", `/pages/${created.id}/versions/`, adminId);
+      const versions = await versionsRes.json();
+
+      await db.update(pages).set({ isLocked: true }).where(eq(pages.id, created.id));
+
+      const res = await makeRequest("POST", `/pages/${created.id}/versions/${versions[0].id}/restore/`, adminId);
+      expect(res.status).toBe(400);
+
+      await db.delete(pageVersions).where(eq(pageVersions.pageId, created.id));
+      await db.update(pages).set({ isLocked: false }).where(eq(pages.id, created.id));
+      await db.delete(pages).where(eq(pages.id, created.id));
+    });
+
+    test("returns 404 for non-existent version", async () => {
+      const createRes = await makeRequest("POST", "/pages/", adminId, { name: "No Version" });
+      const created = await createRes.json();
+
+      const res = await makeRequest("POST", `/pages/${created.id}/versions/${createId()}/restore/`, adminId);
+      expect(res.status).toBe(404);
+
+      await db.delete(pages).where(eq(pages.id, created.id));
+    });
+  });
+
+  describe("GET/POST/DELETE /favorite-pages/ - Favorite Pages (frontend URL pattern)", () => {
+    let favPageId: string;
+
+    test("can add a page to favorites via favorite-pages URL", async () => {
+      const createRes = await makeRequest("POST", "/pages/", adminId, { name: "Fav Page" });
+      const created = await createRes.json();
+      favPageId = created.id;
+
+      const res = await makeRequest("POST", `/favorite-pages/${favPageId}/`, adminId);
+      expect(res.status).toBe(204);
+
+      const fav = await db.query.pageFavorites.findFirst({
+        where: and(eq(pageFavorites.pageId, favPageId), eq(pageFavorites.userId, adminId)),
+      });
+      expect(fav).toBeTruthy();
+    });
+
+    test("can list favorite pages", async () => {
+      const res = await makeRequest("GET", "/favorite-pages/", adminId);
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(Array.isArray(data)).toBe(true);
+      expect(data.length).toBeGreaterThanOrEqual(1);
+      expect(data.some((p: any) => p.id === favPageId)).toBe(true);
+      expect(data.every((p: any) => p.is_favorite === true)).toBe(true);
+    });
+
+    test("can remove from favorites via favorite-pages URL", async () => {
+      const res = await makeRequest("DELETE", `/favorite-pages/${favPageId}/`, adminId);
+      expect(res.status).toBe(204);
+
+      const fav = await db.query.pageFavorites.findFirst({
+        where: and(eq(pageFavorites.pageId, favPageId), eq(pageFavorites.userId, adminId)),
+      });
+      expect(fav).toBeUndefined();
+
+      await db.delete(pages).where(eq(pages.id, favPageId));
+    });
+  });
+
+  describe("GET /archived-pages/ - Archived Pages", () => {
+    let archivedPageId: string;
+
+    test("returns archived pages", async () => {
+      // Create and archive a page
+      const createRes = await makeRequest("POST", "/pages/", adminId, { name: "Archived Page" });
+      const created = await createRes.json();
+      archivedPageId = created.id;
+
+      await makeRequest("POST", `/pages/${archivedPageId}/archive/`, adminId);
+
+      const res = await makeRequest("GET", "/archived-pages/", adminId);
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(Array.isArray(data)).toBe(true);
+      expect(data.some((p: any) => p.id === archivedPageId)).toBe(true);
+      expect(data.every((p: any) => p.archived_at !== null)).toBe(true);
+    });
+
+    test("non-archived pages are excluded", async () => {
+      const createRes = await makeRequest("POST", "/pages/", adminId, { name: "Not Archived" });
+      const created = await createRes.json();
+
+      const res = await makeRequest("GET", "/archived-pages/", adminId);
+      const data = await res.json();
+      expect(data.some((p: any) => p.id === created.id)).toBe(false);
+
+      await db.delete(pages).where(eq(pages.id, created.id));
+    });
+
+    test("cleanup archived page", async () => {
+      await db.update(pages).set({ archivedAt: new Date() }).where(eq(pages.id, archivedPageId));
+      await db.delete(pages).where(eq(pages.id, archivedPageId));
     });
   });
 

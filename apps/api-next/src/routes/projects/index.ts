@@ -2294,6 +2294,344 @@ projectRoutes.get("/:projectId/cycles/:cycleId/progress/", async (c) => {
   });
 });
 
+// GET /:projectId/cycles/:cycleId/analytics/ - Cycle analytics (assignee/label distribution + burndown)
+projectRoutes.get("/:projectId/cycles/:cycleId/analytics/", async (c) => {
+  const project = c.get("project");
+  const workspace = c.get("workspace");
+  if (!project || !workspace) return c.json({ detail: "Not found." }, 404);
+
+  const cycleId = c.req.param("cycleId");
+  const type = c.req.query("type") || "issues"; // "issues" or "points"
+
+  const cycle = await db.query.cycles.findFirst({
+    where: and(eq(cycles.id, cycleId), eq(cycles.projectId, project.id)),
+  });
+  if (!cycle) return c.json({ error: "Cycle not found" }, 404);
+
+  // If cycle has a progress_snapshot with distribution data, return cached data
+  const snapshot = cycle.progressSnapshot as Record<string, any> | null;
+  if (snapshot && snapshot.distribution) {
+    const dist = snapshot.distribution;
+    // Build completion chart from snapshot if available
+    const completionChart = snapshot.completion_chart || {};
+    return c.json({
+      assignees: dist.assignees || [],
+      labels: dist.labels || [],
+      completion_chart: completionChart,
+    });
+  }
+
+  // Get all active cycle issues
+  const cycleIssueRows = await db
+    .select({
+      issueId: cycleIssues.issueId,
+      stateGroup: states.group,
+      estimatePoint: issues.estimatePoint,
+      completedAt: issues.completedAt,
+    })
+    .from(cycleIssues)
+    .innerJoin(issues, eq(cycleIssues.issueId, issues.id))
+    .innerJoin(states, eq(issues.stateId, states.id))
+    .where(
+      and(
+        eq(cycleIssues.cycleId, cycleId),
+        isNull(issues.archivedAt),
+        isNull(issues.deletedAt)
+      )
+    );
+
+  const issueIds = cycleIssueRows.map((r) => r.issueId);
+
+  // --- Assignee distribution ---
+  let assigneeDistribution: any[] = [];
+  if (issueIds.length > 0) {
+    // Get assignee → issue mapping
+    const assigneeRows = await db
+      .select({
+        issueId: issueAssignees.issueId,
+        assigneeId: issueAssignees.assigneeId,
+      })
+      .from(issueAssignees)
+      .where(inArray(issueAssignees.issueId, issueIds));
+
+    // Build issue → state/estimate lookup
+    const issueMap = new Map<string, { stateGroup: string; estimatePoint: number | null }>();
+    for (const row of cycleIssueRows) {
+      issueMap.set(row.issueId, { stateGroup: row.stateGroup, estimatePoint: row.estimatePoint });
+    }
+
+    // Group by assignee
+    const assigneeIssuesMap = new Map<string, string[]>();
+    const unassignedIssues: string[] = [];
+
+    // Track which issues have assignees
+    const assignedIssueIds = new Set<string>();
+    for (const row of assigneeRows) {
+      assignedIssueIds.add(row.issueId);
+      const existing = assigneeIssuesMap.get(row.assigneeId) || [];
+      existing.push(row.issueId);
+      assigneeIssuesMap.set(row.assigneeId, existing);
+    }
+
+    // Find unassigned issues
+    for (const iid of issueIds) {
+      if (!assignedIssueIds.has(iid)) {
+        unassignedIssues.push(iid);
+      }
+    }
+
+    // Get user details
+    const assigneeIds = [...assigneeIssuesMap.keys()];
+    const userMap = new Map<string, { displayName: string | null; avatar: string | null }>();
+    if (assigneeIds.length > 0) {
+      const userRows = await db
+        .select({ id: users.id, displayName: users.displayName, avatar: users.avatar })
+        .from(users)
+        .where(inArray(users.id, assigneeIds));
+      for (const u of userRows) {
+        userMap.set(u.id, { displayName: u.displayName, avatar: u.avatar });
+      }
+    }
+
+    // Build assignee distribution
+    for (const [assigneeId, aIssueIds] of assigneeIssuesMap) {
+      const user = userMap.get(assigneeId);
+      let total = 0;
+      let completed = 0;
+      let pending = 0;
+
+      if (type === "points") {
+        for (const iid of aIssueIds) {
+          const info = issueMap.get(iid);
+          if (!info) continue;
+          const pts = Number(info.estimatePoint) || 0;
+          total += pts;
+          if (info.stateGroup === "completed") completed += pts;
+          else pending += pts;
+        }
+      } else {
+        total = aIssueIds.length;
+        for (const iid of aIssueIds) {
+          const info = issueMap.get(iid);
+          if (info?.stateGroup === "completed") completed++;
+        }
+        pending = total - completed;
+      }
+
+      assigneeDistribution.push({
+        display_name: user?.displayName || "",
+        assignee_id: assigneeId,
+        avatar: user?.avatar || "",
+        total_issues: total,
+        completed_issues: completed,
+        pending_issues: pending,
+      });
+    }
+
+    // Add unassigned bucket if there are unassigned issues
+    if (unassignedIssues.length > 0) {
+      let total = 0;
+      let completed = 0;
+      let pending = 0;
+
+      if (type === "points") {
+        for (const iid of unassignedIssues) {
+          const info = issueMap.get(iid);
+          if (!info) continue;
+          const pts = Number(info.estimatePoint) || 0;
+          total += pts;
+          if (info.stateGroup === "completed") completed += pts;
+          else pending += pts;
+        }
+      } else {
+        total = unassignedIssues.length;
+        for (const iid of unassignedIssues) {
+          const info = issueMap.get(iid);
+          if (info?.stateGroup === "completed") completed++;
+        }
+        pending = total - completed;
+      }
+
+      assigneeDistribution.push({
+        display_name: "",
+        assignee_id: null,
+        avatar: "",
+        total_issues: total,
+        completed_issues: completed,
+        pending_issues: pending,
+      });
+    }
+  }
+
+  // --- Label distribution ---
+  let labelDistribution: any[] = [];
+  if (issueIds.length > 0) {
+    const labelRows = await db
+      .select({
+        issueId: issueLabels.issueId,
+        labelId: issueLabels.labelId,
+      })
+      .from(issueLabels)
+      .where(inArray(issueLabels.issueId, issueIds));
+
+    const issueMap = new Map<string, { stateGroup: string; estimatePoint: number | null }>();
+    for (const row of cycleIssueRows) {
+      issueMap.set(row.issueId, { stateGroup: row.stateGroup, estimatePoint: row.estimatePoint });
+    }
+
+    // Group by label
+    const labelIssuesMap = new Map<string, string[]>();
+    const labeledIssueIds = new Set<string>();
+    for (const row of labelRows) {
+      labeledIssueIds.add(row.issueId);
+      const existing = labelIssuesMap.get(row.labelId) || [];
+      existing.push(row.issueId);
+      labelIssuesMap.set(row.labelId, existing);
+    }
+
+    // Unlabeled issues
+    const unlabeledIssues = issueIds.filter((iid) => !labeledIssueIds.has(iid));
+
+    // Get label details
+    const labelIds = [...labelIssuesMap.keys()];
+    const labelDetailsMap = new Map<string, { name: string; color: string | null }>();
+    if (labelIds.length > 0) {
+      const labelDetailRows = await db
+        .select({ id: labels.id, name: labels.name, color: labels.color })
+        .from(labels)
+        .where(inArray(labels.id, labelIds));
+      for (const l of labelDetailRows) {
+        labelDetailsMap.set(l.id, { name: l.name, color: l.color });
+      }
+    }
+
+    // Build label distribution
+    for (const [labelId, lIssueIds] of labelIssuesMap) {
+      const label = labelDetailsMap.get(labelId);
+      let total = 0;
+      let completed = 0;
+      let pending = 0;
+
+      if (type === "points") {
+        for (const iid of lIssueIds) {
+          const info = issueMap.get(iid);
+          if (!info) continue;
+          const pts = Number(info.estimatePoint) || 0;
+          total += pts;
+          if (info.stateGroup === "completed") completed += pts;
+          else pending += pts;
+        }
+      } else {
+        total = lIssueIds.length;
+        for (const iid of lIssueIds) {
+          const info = issueMap.get(iid);
+          if (info?.stateGroup === "completed") completed++;
+        }
+        pending = total - completed;
+      }
+
+      labelDistribution.push({
+        label_name: label?.name || "",
+        color: label?.color || "",
+        label_id: labelId,
+        total_issues: total,
+        completed_issues: completed,
+        pending_issues: pending,
+      });
+    }
+
+    // Add unlabeled bucket
+    if (unlabeledIssues.length > 0) {
+      let total = 0;
+      let completed = 0;
+      let pending = 0;
+
+      if (type === "points") {
+        for (const iid of unlabeledIssues) {
+          const info = issueMap.get(iid);
+          if (!info) continue;
+          const pts = Number(info.estimatePoint) || 0;
+          total += pts;
+          if (info.stateGroup === "completed") completed += pts;
+          else pending += pts;
+        }
+      } else {
+        total = unlabeledIssues.length;
+        for (const iid of unlabeledIssues) {
+          const info = issueMap.get(iid);
+          if (info?.stateGroup === "completed") completed++;
+        }
+        pending = total - completed;
+      }
+
+      labelDistribution.push({
+        label_name: "None",
+        color: "",
+        label_id: null,
+        total_issues: total,
+        completed_issues: completed,
+        pending_issues: pending,
+      });
+    }
+  }
+
+  // --- Completion chart (burndown) ---
+  const completionChart: Record<string, number | null> = {};
+
+  if (cycle.startDate && cycle.endDate) {
+    const startDate = new Date(cycle.startDate);
+    const endDate = new Date(cycle.endDate);
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+    // Build date range
+    const dateRange: string[] = [];
+    const d = new Date(startDate);
+    while (d <= endDate) {
+      dateRange.push(d.toISOString().split("T")[0]);
+      d.setDate(d.getDate() + 1);
+    }
+
+    // Get total count (issues or points)
+    let totalValue = 0;
+    if (type === "points") {
+      for (const row of cycleIssueRows) {
+        totalValue += Number(row.estimatePoint) || 0;
+      }
+    } else {
+      totalValue = cycleIssueRows.length;
+    }
+
+    // Group completed items by date
+    const completedByDate = new Map<string, number>();
+    for (const row of cycleIssueRows) {
+      if (row.completedAt) {
+        const dateStr = new Date(row.completedAt).toISOString().split("T")[0];
+        const val = type === "points" ? (Number(row.estimatePoint) || 0) : 1;
+        completedByDate.set(dateStr, (completedByDate.get(dateStr) || 0) + val);
+      }
+    }
+
+    // Calculate cumulative pending for each date
+    let cumulativeCompleted = 0;
+    for (const dateStr of dateRange) {
+      const dateObj = new Date(dateStr + "T00:00:00");
+      if (dateObj > today) {
+        completionChart[dateStr] = null;
+      } else {
+        cumulativeCompleted += completedByDate.get(dateStr) || 0;
+        completionChart[dateStr] = totalValue - cumulativeCompleted;
+      }
+    }
+  }
+
+  return c.json({
+    assignees: assigneeDistribution,
+    labels: labelDistribution,
+    completion_chart: completionChart,
+  });
+});
+
 // PATCH /:projectId/cycles/:cycleId/ - Update cycle
 const updateCycleSchema = z.object({
   name: z.string().min(1).optional(),

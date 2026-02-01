@@ -324,7 +324,11 @@ export const generateWorkItemLink = ({
   isEpic?: boolean;
 }): string => {
   const archiveIssueLink = `/${workspaceSlug}/projects/${projectId}/archives/issues/${issueId}`;
-  const workItemLink = `/${workspaceSlug}/browse/${projectIdentifier}-${sequenceId}/`;
+  // Fall back to project issues URL if sequenceId or projectIdentifier is missing (e.g. draft issues)
+  const workItemLink =
+    projectIdentifier && sequenceId != null
+      ? `/${workspaceSlug}/browse/${projectIdentifier}-${sequenceId}/`
+      : `/${workspaceSlug}/projects/${projectId}/issues/${issueId}`;
   const epicLink = workItemLink;
 
   return isArchived ? archiveIssueLink : isEpic ? epicLink : workItemLink;

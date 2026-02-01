@@ -351,10 +351,19 @@ workspaceRoutes.post("/:slug/invitations/:id/join/", zValidator("json", joinInvi
     return c.json({ detail: "Invitation not found." }, 404);
   }
 
-  // Check the email matches
+  // Check the email matches the invitation
   if (!body.email || invitation.email !== body.email) {
     return c.json(
       { error: "You do not have permission to join the workspace" },
+      403
+    );
+  }
+
+  // Verify the authenticated user's email matches the invitation email
+  const user = c.get("user");
+  if (user && user.email !== invitation.email) {
+    return c.json(
+      { error: "You can only respond to invitations sent to your email address" },
       403
     );
   }
@@ -404,6 +413,11 @@ workspaceRoutes.post("/:slug/invitations/:id/join/", zValidator("json", joinInvi
           role: invitation.role,
         });
       }
+
+      // Set the user's last workspace to the accepted workspace
+      await db.update(userProfiles).set({
+        lastWorkspaceId: workspace.id,
+      }).where(eq(userProfiles.userId, invitedUser.id)).catch(() => {});
 
       // Delete the invitation after successful join
       await db.delete(workspaceInvitations).where(eq(workspaceInvitations.id, invitationId));
@@ -2060,22 +2074,223 @@ workspaceRoutes.get("/:slug/my-issues/", async (c) => {
 
 // Search - implemented at end of file
 
-// Notifications (placeholder for full list)
+// =====================================================
+// Notifications
+// =====================================================
+
+function formatNotification(
+  n: typeof notifications.$inferSelect,
+  extra?: {
+    triggeredByDetails?: {
+      id: string;
+      display_name: string;
+      first_name: string;
+      last_name: string;
+      avatar_url: string | null;
+      is_bot: boolean;
+    } | null;
+    isMentionedNotification?: boolean;
+  }
+) {
+  return {
+    id: n.id,
+    workspace: n.workspaceId,
+    project: n.projectId ?? null,
+    entity_identifier: n.entityId ?? null,
+    entity_name: n.entityName ?? null,
+    title: n.title,
+    data: n.data ?? null,
+    message: n.message ?? null,
+    message_html: n.messageHtml ?? null,
+    message_stripped: n.messageStripped ?? null,
+    sender: n.sender ?? "",
+    triggered_by: n.triggeredById ?? null,
+    receiver: n.receiverId,
+    read_at: n.readAt?.toISOString() ?? null,
+    archived_at: n.archivedAt?.toISOString() ?? null,
+    snoozed_till: n.snoozedTill?.toISOString() ?? null,
+    triggered_by_details: extra?.triggeredByDetails ?? null,
+    is_inbox_issue: false,
+    is_intake_issue: false,
+    is_mentioned_notification: extra?.isMentionedNotification ?? (n.sender?.includes("mentioned") ?? false),
+    created_by: n.createdById ?? null,
+    updated_by: n.updatedById ?? null,
+    created_at: n.createdAt?.toISOString() ?? null,
+    updated_at: n.updatedAt?.toISOString() ?? null,
+  };
+}
+
+// GET /api/workspaces/:slug/users/notifications/ - List notifications with filtering
 workspaceRoutes.get("/:slug/users/notifications/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
+  const user = c.get("user");
+  if (!user) return c.json({ detail: "Authentication required." }, 401);
+  const workspace = c.get("workspace");
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  const query = c.req.query();
+
+  // Parse pagination
+  const cursorParam = query.cursor || `${query.per_page || "30"}:0:0`;
+  const cursorParts = cursorParam.split(":");
+  const perPage = Math.min(parseInt(cursorParts[0] || "30") || 30, 1000);
+  const pageNumber = parseInt(cursorParts[1] || "0") || 0;
+  const offset = pageNumber * perPage;
+
+  // Parse order_by
+  const orderByParam = query.order_by || "-created_at";
+  const isDescOrder = orderByParam.startsWith("-");
+  const sortField = isDescOrder ? orderByParam.slice(1) : orderByParam;
+  const sortFn = isDescOrder ? desc : asc;
+
+  let sortColumn: ReturnType<typeof asc>;
+  switch (sortField) {
+    case "created_at":
+      sortColumn = sortFn(notifications.createdAt);
+      break;
+    case "read_at":
+      sortColumn = sortFn(notifications.readAt);
+      break;
+    default:
+      sortColumn = sortFn(notifications.createdAt);
+  }
+
+  // Build conditions
+  const conditions: ReturnType<typeof eq>[] = [
+    eq(notifications.workspaceId, workspace.id),
+    eq(notifications.receiverId, user.id),
+  ];
+
+  // Snoozed filter
+  if (query.snoozed === "true") {
+    conditions.push(isNotNull(notifications.snoozedTill));
+  } else if (query.snoozed === "false" || !query.snoozed) {
+    // By default exclude snoozed (snoozed_till is null or in the past)
+    conditions.push(
+      or(
+        isNull(notifications.snoozedTill),
+        lte(notifications.snoozedTill, new Date())
+      )!
+    );
+  }
+
+  // Archived filter
+  if (query.archived === "true") {
+    conditions.push(isNotNull(notifications.archivedAt));
+  } else {
+    conditions.push(isNull(notifications.archivedAt));
+  }
+
+  // Read filter
+  if (query.read === "true") {
+    conditions.push(isNotNull(notifications.readAt));
+  } else if (query.read === "false") {
+    conditions.push(isNull(notifications.readAt));
+  }
+  // If read not specified, return both
+
+  // Mentioned filter
+  if (query.mentioned === "true") {
+    conditions.push(like(notifications.sender, "%mentioned%"));
+  }
+
+  // Type filter (assigned, created, subscribed)
+  const typeParam = query.type;
+  if (typeParam && typeParam !== "all") {
+    const types = typeParam.split(",").map((t) => t.trim());
+    const typeConditions: ReturnType<typeof eq>[] = [];
+
+    for (const t of types) {
+      if (t === "assigned") {
+        typeConditions.push(like(notifications.sender, "%assigned%"));
+      } else if (t === "created") {
+        typeConditions.push(like(notifications.sender, "%created%"));
+      } else if (t === "subscribed" || t === "watching") {
+        typeConditions.push(like(notifications.sender, "%subscribed%"));
+      }
+    }
+
+    if (typeConditions.length > 0) {
+      conditions.push(or(...typeConditions)!);
+    }
+  }
+
+  // Fetch total count
+  const totalResult = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(notifications)
+    .where(and(...conditions));
+  const totalCount = Number(totalResult[0]?.count ?? 0);
+
+  // Fetch paginated results
+  const results = await db
+    .select()
+    .from(notifications)
+    .where(and(...conditions))
+    .orderBy(sortColumn)
+    .limit(perPage)
+    .offset(offset);
+
+  // Batch fetch triggered_by details
+  const triggeredByIds = [...new Set(results.map((n) => n.triggeredById).filter(Boolean))];
+  const triggeredByRows =
+    triggeredByIds.length > 0
+      ? await db
+          .select({
+            id: users.id,
+            displayName: users.displayName,
+            firstName: users.name,
+            avatar: users.avatar,
+          })
+          .from(users)
+          .where(inArray(users.id, triggeredByIds as string[]))
+      : [];
+  const triggeredByMap = new Map(
+    triggeredByRows.map((u) => [
+      u.id,
+      {
+        id: u.id,
+        display_name: u.displayName ?? u.firstName ?? "",
+        first_name: u.firstName ?? "",
+        last_name: "",
+        avatar_url: u.avatar ?? null,
+        is_bot: false,
+      },
+    ])
+  );
+
+  // Pagination
+  const totalPages = Math.ceil(totalCount / perPage);
+  const nextPageExists = pageNumber + 1 < totalPages;
+  const prevPageExists = pageNumber > 0;
+  const nextCursor = `${perPage}:${pageNumber + 1}:0`;
+  const prevCursor = `${perPage}:${pageNumber > 0 ? pageNumber - 1 : 0}:0`;
+
+  return c.json({
+    grouped_by: null,
+    sub_grouped_by: null,
+    next_cursor: nextCursor,
+    prev_cursor: prevCursor,
+    next_page_results: nextPageExists,
+    prev_page_results: prevPageExists,
+    total_count: totalCount,
+    count: results.length,
+    total_pages: totalPages,
+    total_results: totalCount,
+    extra_stats: null,
+    results: results.map((n) =>
+      formatNotification(n, {
+        triggeredByDetails: n.triggeredById ? triggeredByMap.get(n.triggeredById) ?? null : null,
+      })
+    ),
+  });
 });
 
 // GET /api/workspaces/:slug/users/notifications/unread/ - Get unread notification counts
 workspaceRoutes.get("/:slug/users/notifications/unread/", async (c) => {
   const user = c.get("user");
-  if (!user) {
-    return c.json({ detail: "Authentication required." }, 401);
-  }
-
+  if (!user) return c.json({ detail: "Authentication required." }, 401);
   const workspace = c.get("workspace");
-  if (!workspace) {
-    return c.json({ detail: "Workspace not found." }, 404);
-  }
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
 
   // Count unread notifications excluding mentions
   const unreadResult = await db
@@ -2087,7 +2302,10 @@ workspaceRoutes.get("/:slug/users/notifications/unread/", async (c) => {
         eq(notifications.receiverId, user.id),
         isNull(notifications.readAt),
         isNull(notifications.archivedAt),
-        isNull(notifications.snoozedTill),
+        or(
+          isNull(notifications.snoozedTill),
+          lte(notifications.snoozedTill, new Date())
+        ),
         not(like(notifications.sender, "%mentioned%"))
       )
     );
@@ -2102,7 +2320,10 @@ workspaceRoutes.get("/:slug/users/notifications/unread/", async (c) => {
         eq(notifications.receiverId, user.id),
         isNull(notifications.readAt),
         isNull(notifications.archivedAt),
-        isNull(notifications.snoozedTill),
+        or(
+          isNull(notifications.snoozedTill),
+          lte(notifications.snoozedTill, new Date())
+        ),
         like(notifications.sender, "%mentioned%")
       )
     );
@@ -2111,6 +2332,250 @@ workspaceRoutes.get("/:slug/users/notifications/unread/", async (c) => {
     total_unread_notifications_count: Number(unreadResult[0]?.count ?? 0),
     mention_unread_notifications_count: Number(mentionResult[0]?.count ?? 0),
   });
+});
+
+// POST /api/workspaces/:slug/users/notifications/mark-all-read/ - Mark all notifications as read
+workspaceRoutes.post("/:slug/users/notifications/mark-all-read/", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.json({ detail: "Authentication required." }, 401);
+  const workspace = c.get("workspace");
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  let body: Record<string, unknown> = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    // Empty body is fine
+  }
+
+  const conditions: ReturnType<typeof eq>[] = [
+    eq(notifications.workspaceId, workspace.id),
+    eq(notifications.receiverId, user.id),
+    isNull(notifications.readAt),
+  ];
+
+  // Apply same filters as list endpoint
+  if (body.snoozed === true) {
+    conditions.push(isNotNull(notifications.snoozedTill));
+  } else {
+    conditions.push(
+      or(
+        isNull(notifications.snoozedTill),
+        lte(notifications.snoozedTill, new Date())
+      )!
+    );
+  }
+
+  if (body.archived === true) {
+    conditions.push(isNotNull(notifications.archivedAt));
+  } else {
+    conditions.push(isNull(notifications.archivedAt));
+  }
+
+  const typeParam = body.type as string | undefined;
+  if (typeParam && typeParam !== "all") {
+    const types = typeParam.split(",").map((t) => t.trim());
+    const typeConditions: ReturnType<typeof eq>[] = [];
+
+    for (const t of types) {
+      if (t === "assigned") typeConditions.push(like(notifications.sender, "%assigned%"));
+      else if (t === "created") typeConditions.push(like(notifications.sender, "%created%"));
+      else if (t === "subscribed" || t === "watching") typeConditions.push(like(notifications.sender, "%subscribed%"));
+    }
+
+    if (typeConditions.length > 0) {
+      conditions.push(or(...typeConditions)!);
+    }
+  }
+
+  await db
+    .update(notifications)
+    .set({ readAt: new Date(), updatedAt: new Date() })
+    .where(and(...conditions));
+
+  return c.json({ message: "All notifications marked as read." });
+});
+
+// GET /api/workspaces/:slug/users/notifications/:notificationId/ - Get single notification
+workspaceRoutes.get("/:slug/users/notifications/:notificationId/", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.json({ detail: "Authentication required." }, 401);
+  const workspace = c.get("workspace");
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  const notificationId = c.req.param("notificationId");
+
+  const notification = await db.query.notifications.findFirst({
+    where: and(
+      eq(notifications.id, notificationId),
+      eq(notifications.workspaceId, workspace.id),
+      eq(notifications.receiverId, user.id)
+    ),
+  });
+
+  if (!notification) return c.json({ detail: "Notification not found." }, 404);
+
+  let triggeredByDetails = null;
+  if (notification.triggeredById) {
+    const trigUser = await db.query.users.findFirst({
+      where: eq(users.id, notification.triggeredById),
+    });
+    if (trigUser) {
+      triggeredByDetails = {
+        id: trigUser.id,
+        display_name: trigUser.displayName ?? trigUser.name ?? "",
+        first_name: trigUser.name ?? "",
+        last_name: "",
+        avatar_url: trigUser.avatar ?? null,
+        is_bot: false,
+      };
+    }
+  }
+
+  return c.json(formatNotification(notification, { triggeredByDetails }));
+});
+
+// PATCH /api/workspaces/:slug/users/notifications/:notificationId/ - Update notification (snooze)
+workspaceRoutes.patch("/:slug/users/notifications/:notificationId/", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.json({ detail: "Authentication required." }, 401);
+  const workspace = c.get("workspace");
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  const notificationId = c.req.param("notificationId");
+
+  const notification = await db.query.notifications.findFirst({
+    where: and(
+      eq(notifications.id, notificationId),
+      eq(notifications.workspaceId, workspace.id),
+      eq(notifications.receiverId, user.id)
+    ),
+  });
+
+  if (!notification) return c.json({ detail: "Notification not found." }, 404);
+
+  const body = await c.req.json();
+  const updateData: Record<string, unknown> = { updatedAt: new Date() };
+
+  if (body.snoozed_till !== undefined) {
+    updateData.snoozedTill = body.snoozed_till ? new Date(body.snoozed_till) : null;
+  }
+
+  await db.update(notifications).set(updateData).where(eq(notifications.id, notificationId));
+
+  const updated = await db.query.notifications.findFirst({
+    where: eq(notifications.id, notificationId),
+  });
+
+  return c.json(formatNotification(updated!));
+});
+
+// POST /api/workspaces/:slug/users/notifications/:notificationId/read/ - Mark as read
+workspaceRoutes.post("/:slug/users/notifications/:notificationId/read/", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.json({ detail: "Authentication required." }, 401);
+  const workspace = c.get("workspace");
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  const notificationId = c.req.param("notificationId");
+
+  const notification = await db.query.notifications.findFirst({
+    where: and(
+      eq(notifications.id, notificationId),
+      eq(notifications.workspaceId, workspace.id),
+      eq(notifications.receiverId, user.id)
+    ),
+  });
+
+  if (!notification) return c.json({ detail: "Notification not found." }, 404);
+
+  await db
+    .update(notifications)
+    .set({ readAt: new Date(), updatedAt: new Date() })
+    .where(eq(notifications.id, notificationId));
+
+  return c.json({ message: "Notification marked as read." });
+});
+
+// DELETE /api/workspaces/:slug/users/notifications/:notificationId/read/ - Mark as unread
+workspaceRoutes.delete("/:slug/users/notifications/:notificationId/read/", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.json({ detail: "Authentication required." }, 401);
+  const workspace = c.get("workspace");
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  const notificationId = c.req.param("notificationId");
+
+  const notification = await db.query.notifications.findFirst({
+    where: and(
+      eq(notifications.id, notificationId),
+      eq(notifications.workspaceId, workspace.id),
+      eq(notifications.receiverId, user.id)
+    ),
+  });
+
+  if (!notification) return c.json({ detail: "Notification not found." }, 404);
+
+  await db
+    .update(notifications)
+    .set({ readAt: null, updatedAt: new Date() })
+    .where(eq(notifications.id, notificationId));
+
+  return c.json({ message: "Notification marked as unread." });
+});
+
+// POST /api/workspaces/:slug/users/notifications/:notificationId/archive/ - Archive
+workspaceRoutes.post("/:slug/users/notifications/:notificationId/archive/", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.json({ detail: "Authentication required." }, 401);
+  const workspace = c.get("workspace");
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  const notificationId = c.req.param("notificationId");
+
+  const notification = await db.query.notifications.findFirst({
+    where: and(
+      eq(notifications.id, notificationId),
+      eq(notifications.workspaceId, workspace.id),
+      eq(notifications.receiverId, user.id)
+    ),
+  });
+
+  if (!notification) return c.json({ detail: "Notification not found." }, 404);
+
+  await db
+    .update(notifications)
+    .set({ archivedAt: new Date(), updatedAt: new Date() })
+    .where(eq(notifications.id, notificationId));
+
+  return c.json({ message: "Notification archived." });
+});
+
+// DELETE /api/workspaces/:slug/users/notifications/:notificationId/archive/ - Unarchive
+workspaceRoutes.delete("/:slug/users/notifications/:notificationId/archive/", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.json({ detail: "Authentication required." }, 401);
+  const workspace = c.get("workspace");
+  if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+  const notificationId = c.req.param("notificationId");
+
+  const notification = await db.query.notifications.findFirst({
+    where: and(
+      eq(notifications.id, notificationId),
+      eq(notifications.workspaceId, workspace.id),
+      eq(notifications.receiverId, user.id)
+    ),
+  });
+
+  if (!notification) return c.json({ detail: "Notification not found." }, 404);
+
+  await db
+    .update(notifications)
+    .set({ archivedAt: null, updatedAt: new Date() })
+    .where(eq(notifications.id, notificationId));
+
+  return c.json({ message: "Notification unarchived." });
 });
 
 // Favorites

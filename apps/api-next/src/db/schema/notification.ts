@@ -32,6 +32,8 @@ export const notifications = sqliteTable(
     readAt: integer("read_at", { mode: "timestamp" }),
     archivedAt: integer("archived_at", { mode: "timestamp" }),
     snoozedTill: integer("snoozed_till", { mode: "timestamp" }),
+    createdById: text("created_by_id").references(() => users.id),
+    updatedById: text("updated_by_id").references(() => users.id),
     createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
     updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
   },
