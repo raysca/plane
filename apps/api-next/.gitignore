@@ -39,3 +39,4 @@ data/plane.db-*
 local.db
 plane.db
 plane.db-*
+uploads/*
