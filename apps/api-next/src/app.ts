@@ -18,6 +18,8 @@ import { assetRoutes } from "./routes/assets";
 import { timezoneRoutes } from "./routes/timezones";
 import { pageRoutes, pageFavoriteRoutes, archivedPageRoutes, pageSummaryRoutes } from "./routes/pages";
 import { intakeRoutes } from "./routes/intake";
+import { deployBoardRoutes } from "./routes/projects/deploy-boards";
+import { publicAnchorRoutes } from "./routes/public/anchor";
 
 
 // Types for context variables
@@ -121,6 +123,8 @@ app.route("/api/workspaces/:slug/projects/:projectId/archived-pages/", archivedP
 app.route("/api/workspaces/:slug/projects/:projectId/pages-summary/", pageSummaryRoutes);
 app.route("/api/workspaces/:slug/projects/:projectId/inbox-issues/", intakeRoutes);
 app.route("/api/workspaces/:slug/projects/:projectId/intake-issues/", intakeRoutes);
+app.route("/api/workspaces/:slug/projects/:projectId/project-deploy-boards/", deployBoardRoutes);
+app.route("/api/public/", publicAnchorRoutes);
 app.route("/api/workspace-slug-check/", workspaceSlugCheckRoutes);
 app.route("/api/unsplash/", externalRoutes);
 app.route("/api/assets/v2/", assetRoutes);

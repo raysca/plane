@@ -6,7 +6,7 @@ import { db } from "../db";
 import { fileAssets, ENTITY_TYPES, type EntityType } from "../db/schema/asset";
 import { workspaces } from "../db/schema/workspace";
 import { projects } from "../db/schema/project";
-import { eq, and } from "drizzle-orm";
+import { eq, and, inArray } from "drizzle-orm";
 import { authMiddleware } from "../middleware/auth";
 import { workspaceMiddleware } from "../middleware/workspace";
 import { getStorage, FILE_SIZE_LIMIT, isS3Configured } from "../lib/storage";
@@ -147,7 +147,7 @@ workspaceAssetRoutes.post("/", zValidator("json", createAssetSchema), async (c) 
 });
 
 // PATCH /api/assets/v2/workspaces/:slug/:assetId/ — Mark uploaded + bind entity
-workspaceAssetRoutes.patch("/:assetId", zValidator("json", updateAssetSchema), async (c) => {
+workspaceAssetRoutes.patch("/:assetId/", zValidator("json", updateAssetSchema), async (c) => {
   const assetId = c.req.param("assetId");
   const workspace = c.get("workspace")!;
   const body = c.req.valid("json");
@@ -187,7 +187,7 @@ workspaceAssetRoutes.patch("/:assetId", zValidator("json", updateAssetSchema), a
 });
 
 // DELETE /api/assets/v2/workspaces/:slug/:assetId/ — Soft-delete
-workspaceAssetRoutes.delete("/:assetId", async (c) => {
+workspaceAssetRoutes.delete("/:assetId/", async (c) => {
   const assetId = c.req.param("assetId");
   const workspace = c.get("workspace")!;
 
@@ -208,7 +208,7 @@ workspaceAssetRoutes.delete("/:assetId", async (c) => {
 });
 
 // GET /api/assets/v2/workspaces/:slug/:assetId/ — Download (redirect to signed URL)
-workspaceAssetRoutes.get("/:assetId", async (c) => {
+workspaceAssetRoutes.get("/:assetId/", async (c) => {
   const assetId = c.req.param("assetId");
   const workspace = c.get("workspace")!;
 
@@ -228,7 +228,7 @@ workspaceAssetRoutes.get("/:assetId", async (c) => {
 });
 
 // GET /api/assets/v2/workspaces/:slug/download/:assetId/ — Download with attachment header
-workspaceAssetRoutes.get("/download/:assetId", async (c) => {
+workspaceAssetRoutes.get("/download/:assetId/", async (c) => {
   const assetId = c.req.param("assetId");
   const workspace = c.get("workspace")!;
 
@@ -252,7 +252,7 @@ workspaceAssetRoutes.get("/download/:assetId", async (c) => {
 });
 
 // GET /api/assets/v2/workspaces/:slug/check/:assetId/ — Check asset exists
-workspaceAssetRoutes.get("/check/:assetId", async (c) => {
+workspaceAssetRoutes.get("/check/:assetId/", async (c) => {
   const assetId = c.req.param("assetId");
   const workspace = c.get("workspace")!;
 
@@ -267,7 +267,7 @@ workspaceAssetRoutes.get("/check/:assetId", async (c) => {
 });
 
 // POST /api/assets/v2/workspaces/:slug/restore/:assetId/ — Restore soft-deleted
-workspaceAssetRoutes.post("/restore/:assetId", async (c) => {
+workspaceAssetRoutes.post("/restore/:assetId/", async (c) => {
   const assetId = c.req.param("assetId");
   const workspace = c.get("workspace")!;
 
@@ -275,6 +275,46 @@ workspaceAssetRoutes.post("/restore/:assetId", async (c) => {
     .update(fileAssets)
     .set({ isDeleted: false, deletedAt: null })
     .where(and(eq(fileAssets.id, assetId), eq(fileAssets.workspaceId, workspace.id)));
+
+  return c.body(null, 204);
+});
+
+// POST /api/assets/v2/workspaces/:slug/:entityId/bulk/ — Bulk bind assets to entity
+workspaceAssetRoutes.post("/:entityId/bulk/", async (c) => {
+  const workspace = c.get("workspace")!;
+  const entityId = c.req.param("entityId");
+  const body = await c.req.json<{ asset_ids?: string[] }>();
+
+  const assetIds = body.asset_ids;
+  if (!assetIds || assetIds.length === 0) {
+    return c.json({ error: "asset_ids is required" }, 400);
+  }
+
+  const assets = await db
+    .select()
+    .from(fileAssets)
+    .where(and(inArray(fileAssets.id, assetIds), eq(fileAssets.workspaceId, workspace.id)));
+
+  if (assets.length === 0) {
+    return c.json({ error: "No matching assets found" }, 404);
+  }
+
+  for (const asset of assets) {
+    await db
+      .update(fileAssets)
+      .set({ entityIdentifier: entityId, updatedAt: new Date() })
+      .where(eq(fileAssets.id, asset.id));
+
+    // For PROJECT_COVER, also update the project's cover_image
+    if (asset.entityType === ENTITY_TYPES.PROJECT_COVER) {
+      const assetUrl = `/api/assets/v2/static/${asset.id}/`;
+      await db
+        .update(projects)
+        .set({ coverImage: assetUrl })
+        .where(eq(projects.id, entityId))
+        .catch(() => {});
+    }
+  }
 
   return c.body(null, 204);
 });
@@ -340,7 +380,7 @@ projectAssetRoutes.post("/", zValidator("json", createAssetSchema), async (c) =>
 });
 
 // PATCH /api/assets/v2/workspaces/:slug/projects/:projectId/:assetId/
-projectAssetRoutes.patch("/:assetId", zValidator("json", updateAssetSchema), async (c) => {
+projectAssetRoutes.patch("/:assetId/", zValidator("json", updateAssetSchema), async (c) => {
   const assetId = c.req.param("assetId");
 
   const asset = await db.query.fileAssets.findFirst({
@@ -377,7 +417,7 @@ projectAssetRoutes.patch("/:assetId", zValidator("json", updateAssetSchema), asy
 });
 
 // DELETE /api/assets/v2/workspaces/:slug/projects/:projectId/:assetId/
-projectAssetRoutes.delete("/:assetId", async (c) => {
+projectAssetRoutes.delete("/:assetId/", async (c) => {
   const assetId = c.req.param("assetId");
   const workspace = c.get("workspace")!;
   const projectId = c.req.param("projectId");
@@ -403,7 +443,7 @@ projectAssetRoutes.delete("/:assetId", async (c) => {
 });
 
 // GET /api/assets/v2/workspaces/:slug/projects/:projectId/:assetId/
-projectAssetRoutes.get("/:assetId", async (c) => {
+projectAssetRoutes.get("/:assetId/", async (c) => {
   const assetId = c.req.param("assetId");
   const workspace = c.get("workspace")!;
   const projectId = c.req.param("projectId");
@@ -428,7 +468,7 @@ projectAssetRoutes.get("/:assetId", async (c) => {
 });
 
 // GET /api/assets/v2/workspaces/:slug/projects/:projectId/download/:assetId/
-projectAssetRoutes.get("/download/:assetId", async (c) => {
+projectAssetRoutes.get("/download/:assetId/", async (c) => {
   const assetId = c.req.param("assetId");
   const workspace = c.get("workspace")!;
   const projectId = c.req.param("projectId");
@@ -453,12 +493,56 @@ projectAssetRoutes.get("/download/:assetId", async (c) => {
   return c.redirect(signedUrl, 302);
 });
 
+// POST /api/assets/v2/workspaces/:slug/projects/:projectId/:entityId/bulk/ — Bulk bind project assets
+projectAssetRoutes.post("/:entityId/bulk/", async (c) => {
+  const workspace = c.get("workspace")!;
+  const projectId = c.req.param("projectId");
+  const entityId = c.req.param("entityId");
+  const body = await c.req.json<{ asset_ids?: string[] }>();
+
+  const assetIds = body.asset_ids;
+  if (!assetIds || assetIds.length === 0) {
+    return c.json({ error: "asset_ids is required" }, 400);
+  }
+
+  const assets = await db
+    .select()
+    .from(fileAssets)
+    .where(and(inArray(fileAssets.id, assetIds), eq(fileAssets.workspaceId, workspace.id)));
+
+  if (assets.length === 0) {
+    return c.json({ error: "No matching assets found" }, 404);
+  }
+
+  for (const asset of assets) {
+    const updates: Record<string, unknown> = {
+      entityIdentifier: entityId,
+      projectId,
+      updatedAt: new Date(),
+    };
+
+    await db.update(fileAssets).set(updates).where(eq(fileAssets.id, asset.id));
+
+    // For PROJECT_COVER, also update the project's cover_image
+    if (asset.entityType === ENTITY_TYPES.PROJECT_COVER) {
+      const assetUrl = `/api/assets/v2/static/${asset.id}/`;
+      await db
+        .update(projects)
+        .set({ coverImage: assetUrl })
+        .where(eq(projects.id, entityId))
+        .catch(() => {});
+    }
+  }
+
+  return c.body(null, 204);
+});
+
 // --- Static asset route (public, no auth required) ---
 
 const staticAssetRoutes = new Hono<{ Variables: Variables }>();
 
 // GET /api/assets/v2/static/:assetId/ — Public static asset URL
-staticAssetRoutes.get("/:assetId", async (c) => {
+staticAssetRoutes.get("/:assetId/", async (c) => {
   const assetId = c.req.param("assetId");
 
   const asset = await db.query.fileAssets.findFirst({
@@ -537,7 +621,7 @@ userAssetRoutes.post("/", zValidator("json", createUserAssetSchema), async (c) =
 });
 
 // PATCH /api/assets/v2/user-assets/:assetId/ — Mark uploaded
-userAssetRoutes.patch("/:assetId", zValidator("json", updateAssetSchema), async (c) => {
+userAssetRoutes.patch("/:assetId/", zValidator("json", updateAssetSchema), async (c) => {
   const assetId = c.req.param("assetId");
   const user = c.get("user")!;
 
@@ -565,7 +649,7 @@ userAssetRoutes.patch("/:assetId", zValidator("json", updateAssetSchema), async 
 });
 
 // DELETE /api/assets/v2/user-assets/:assetId/ — Soft-delete user asset
-userAssetRoutes.delete("/:assetId", async (c) => {
+userAssetRoutes.delete("/:assetId/", async (c) => {
   const assetId = c.req.param("assetId");
   const user = c.get("user")!;
 

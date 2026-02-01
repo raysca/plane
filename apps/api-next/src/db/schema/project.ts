@@ -365,3 +365,56 @@ export const projectUserPropertiesRelations = relations(projectUserProperties, (
     references: [users.id],
   }),
 }));
+
+// Deploy Boards (Publish Project)
+export const deployBoards = sqliteTable(
+  "deploy_boards",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    entityIdentifier: text("entity_identifier"),
+    entityName: text("entity_name"), // "project", "page", "view", etc.
+    anchor: text("anchor")
+      .notNull()
+      .unique()
+      .$defaultFn(() => crypto.randomUUID().replace(/-/g, "")),
+    isCommentsEnabled: integer("is_comments_enabled", { mode: "boolean" }).default(false),
+    isReactionsEnabled: integer("is_reactions_enabled", { mode: "boolean" }).default(false),
+    isVotesEnabled: integer("is_votes_enabled", { mode: "boolean" }).default(false),
+    viewProps: text("view_props", { mode: "json" }).$defaultFn(() => ({})),
+    isActivityEnabled: integer("is_activity_enabled", { mode: "boolean" }).default(true),
+    isDisabled: integer("is_disabled", { mode: "boolean" }).default(false),
+    createdById: text("created_by_id").references(() => users.id),
+    createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+    deletedAt: integer("deleted_at", { mode: "timestamp" }),
+  },
+  (table) => [
+    index("deploy_board_workspace_idx").on(table.workspaceId),
+    index("deploy_board_project_idx").on(table.projectId),
+    index("deploy_board_anchor_idx").on(table.anchor),
+    index("deploy_board_entity_idx").on(table.entityName, table.entityIdentifier),
+  ]
+);
+
+export const deployBoardsRelations = relations(deployBoards, ({ one }) => ({
+  workspace: one(workspaces, {
+    fields: [deployBoards.workspaceId],
+    references: [workspaces.id],
+  }),
+  project: one(projects, {
+    fields: [deployBoards.projectId],
+    references: [projects.id],
+  }),
+  createdBy: one(users, {
+    fields: [deployBoards.createdById],
+    references: [users.id],
+  }),
+}));
