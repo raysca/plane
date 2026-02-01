@@ -6,6 +6,7 @@ import { workspaceMembers } from "./db/schema/workspace";
 import { projectMembers } from "./db/schema/project";
 import { eq, and } from "drizzle-orm";
 import admin from './admin/index.html'
+import { instanceAdmins } from "./db/schema/instance";
 
 // WebSocket data interface
 interface WebSocketData {
@@ -284,6 +285,33 @@ const server = Bun.serve({
   port,
   routes: {
     '/admin': admin,
+    '/admin/*': async (req: Request) => {
+      const url = new URL(req.url);
+      const pathname = url.pathname;
+
+      // For paths beyond /admin/ (dashboard routes), check instance admin auth
+      // /admin and /admin/ serve without auth (sign-in page)
+      if (pathname !== '/admin' && pathname !== '/admin/') {
+        try {
+          const session = await auth.api.getSession({ headers: req.headers });
+          if (!session || !session.user) {
+            return Response.redirect(new URL('/admin', req.url).toString(), 302);
+          }
+          // Check if user is an instance admin
+          const adminRecord = await db.query.instanceAdmins.findFirst({
+            where: eq(instanceAdmins.userId, session.user.id),
+          });
+          if (!adminRecord) {
+            return Response.redirect(new URL('/admin', req.url).toString(), 302);
+          }
+        } catch {
+          return Response.redirect(new URL('/admin', req.url).toString(), 302);
+        }
+      }
+
+      // SPA fallback: internally fetch the bundled /admin HTML from this server
+      return fetch(new URL('/admin', req.url));
+    },
     '/ws/*': async (req: Request, server: Server<WebSocketData>) => {
       // Validate session cookie before allowing upgrade
       const token = extractSessionToken(req);

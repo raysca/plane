@@ -1,0 +1,14 @@
+@import "@plane/tailwind-config/index.css";
+
+.shadow-custom {
+  box-shadow: 2px 2px 8px 2px rgba(234, 231, 250, 0.3);
+}
+
+.backdrop-blur-custom {
+  @apply backdrop-filter blur-[9px];
+}
+
+.progress-bar {
+  fill: currentColor;
+  color: var(--background-color-surface-1);
+}

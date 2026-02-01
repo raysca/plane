@@ -1,0 +1,45 @@
+import { useEffect, useRef } from "react";
+import { observer } from "mobx-react";
+import { useOutsideClickDetector } from "@plane/hooks";
+import { useTheme } from "../hooks/store";
+import { AdminSidebarDropdown } from "./sidebar-dropdown";
+import { AdminSidebarHelpSection } from "./sidebar-help-section";
+import { AdminSidebarMenu } from "./sidebar-menu";
+
+export const AdminSidebar = observer(function AdminSidebar() {
+  const { isSidebarCollapsed, toggleSidebar } = useTheme();
+  const ref = useRef<HTMLDivElement>(null);
+
+  useOutsideClickDetector(ref, () => {
+    if (isSidebarCollapsed === false) {
+      if (window.innerWidth < 768) toggleSidebar(!isSidebarCollapsed);
+    }
+  });
+
+  useEffect(() => {
+    const handleResize = () => {
+      if (window.innerWidth <= 768) toggleSidebar(true);
+    };
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => { window.removeEventListener("resize", handleResize); };
+  }, [toggleSidebar]);
+
+  return (
+    <div
+      className={`inset-y-0 z-20 flex h-full flex-shrink-0 flex-grow-0 flex-col border-r border-subtle bg-surface-1 duration-300
+        fixed md:relative
+        ${isSidebarCollapsed ? "-ml-[290px]" : ""}
+        sm:${isSidebarCollapsed ? "-ml-[290px]" : ""}
+        md:ml-0 ${isSidebarCollapsed ? "w-[70px]" : "w-[290px]"}
+        lg:ml-0 ${isSidebarCollapsed ? "w-[70px]" : "w-[290px]"}
+      `}
+    >
+      <div ref={ref} className="flex h-full w-full flex-1 flex-col">
+        <AdminSidebarDropdown />
+        <AdminSidebarMenu />
+        <AdminSidebarHelpSection />
+      </div>
+    </div>
+  );
+});

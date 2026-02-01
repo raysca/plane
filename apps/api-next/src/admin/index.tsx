@@ -1,15 +1,19 @@
+import React from "react";
 import { createRoot } from "react-dom/client";
-import Main from "./components/main";
+import { RouterProvider } from "react-router-dom";
+import { AppProviders } from "./providers";
+import { router } from "./router";
 
-export default function Admin() {
-    return <div>
-        <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: 16 }}>
-            <h1 style={{ fontSize: 24, fontWeight: 700 }}>Admin</h1>
-        </header>
-        <Main />
-    </div>;
-}
+import "./globals.css";
 
+const container = document.getElementById("root");
+if (!container) throw new Error("Root element not found");
 
-const root = createRoot(document.getElementById('root')!);
-root.render(<Admin />);
+const root = createRoot(container);
+root.render(
+  <React.StrictMode>
+    <AppProviders>
+      <RouterProvider router={router} />
+    </AppProviders>
+  </React.StrictMode>
+);
