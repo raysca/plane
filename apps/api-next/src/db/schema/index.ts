@@ -34,6 +34,9 @@ export * from "./webhook";
 // Background Jobs
 export * from "./job";
 
+// Draft Issues
+export * from "./draft";
+
 // File Assets
 export * from "./asset";
 

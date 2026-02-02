@@ -18,6 +18,7 @@ import { assetRoutes } from "./routes/assets";
 import { timezoneRoutes } from "./routes/timezones";
 import { pageRoutes, pageFavoriteRoutes, archivedPageRoutes, pageSummaryRoutes } from "./routes/pages";
 import { intakeRoutes } from "./routes/intake";
+import { draftRoutes, draftToIssueRoutes } from "./routes/drafts";
 import { deployBoardRoutes } from "./routes/projects/deploy-boards";
 import { publicAnchorRoutes } from "./routes/public/anchor";
 
@@ -125,6 +126,8 @@ app.route("/api/workspaces/:slug/projects/:projectId/inbox-issues/", intakeRoute
 app.route("/api/workspaces/:slug/projects/:projectId/intake-issues/", intakeRoutes);
 app.route("/api/workspaces/:slug/projects/:projectId/project-deploy-boards/", deployBoardRoutes);
 app.route("/api/public/", publicAnchorRoutes);
+app.route("/api/workspaces/:slug/draft-issues/", draftRoutes);
+app.route("/api/workspaces/:slug/draft-to-issue/", draftToIssueRoutes);
 app.route("/api/workspace-slug-check/", workspaceSlugCheckRoutes);
 app.route("/api/unsplash/", externalRoutes);
 app.route("/api/assets/v2/", assetRoutes);
