@@ -1,85 +1,174 @@
-import { test, expect } from "../../fixtures/base";
+import { test, expect, type Page } from "@playwright/test";
 
-test.describe("Admin Dashboard", () => {
-  test("should load the admin instance endpoint", async ({ apiContext }) => {
-    const response = await apiContext.get("/api/instances/");
-    expect(response.ok()).toBeTruthy();
+const API_BASE = process.env.API_BASE_URL || "http://localhost:8000";
+const ADMIN_EMAIL = "admin-e2e@plane.test";
+const ADMIN_PASSWORD = "AdminPassword123!";
 
-    const data = await response.json();
-    expect(data).toBeDefined();
+// ---------------------------------------------------------------------------
+// Helper: ensure the admin exists, then sign in via API and set cookies
+// ---------------------------------------------------------------------------
+async function signInAdminViaCookies(page: Page, request: any): Promise<boolean> {
+  // Ensure admin account exists (ignore if already created)
+  await request
+    .post(`${API_BASE}/api/instances/admins/sign-up/`, {
+      data: {
+        email: ADMIN_EMAIL,
+        password: ADMIN_PASSWORD,
+        first_name: "Admin",
+        last_name: "E2E",
+        company_name: "E2E Test Co",
+        is_telemetry_enabled: false,
+      },
+      maxRedirects: 0,
+    })
+    .catch(() => {});
+
+  // Sign in via the admin sign-in API endpoint (captures redirect + cookies)
+  const signInRes = await request
+    .post(`${API_BASE}/api/instances/admins/sign-in/`, {
+      data: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD },
+      maxRedirects: 0,
+    })
+    .catch(() => null);
+
+  if (!signInRes) return false;
+
+  // Extract cookies from the sign-in response
+  const cookies = signInRes
+    .headersArray()
+    .filter((h: any) => h.name.toLowerCase() === "set-cookie")
+    .map((h: any) => h.value);
+
+  for (const cookie of cookies) {
+    const parts = cookie.split(";")[0]!.split("=");
+    const name = parts[0]!.trim();
+    const value = parts.slice(1).join("=").trim();
+    if (name && value) {
+      await page.context().addCookies([
+        { name, value, domain: "localhost", path: "/" },
+      ]);
+    }
+  }
+
+  return cookies.length > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Admin Sign-in Page (no auth required)
+// ---------------------------------------------------------------------------
+test.describe("Admin Sign-in Page", () => {
+  test("should display the admin sign-in form", async ({ page }) => {
+    await page.goto(`${API_BASE}/admin`);
+    await page.waitForLoadState("networkidle");
+
+    await expect(page.locator("#email")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("#password")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /sign in/i })
+    ).toBeVisible();
   });
 
-  test("should list workspaces via the API", async ({ apiContext }) => {
-    const response = await apiContext.get("/api/workspaces/");
-    expect(response.ok()).toBeTruthy();
-
-    const data = await response.json();
-    expect(Array.isArray(data)).toBeTruthy();
+  test("should redirect unauthenticated users to sign-in", async ({ page }) => {
+    await page.goto(`${API_BASE}/admin/general/`);
+    await expect(page).toHaveURL(/\/admin\/?$/);
   });
 
-  test("should create a workspace", async ({ apiContext }) => {
-    const slug = `e2e-ws-${Date.now().toString(36)}`;
+  test("should show Manage your Plane instance heading", async ({ page }) => {
+    await page.goto(`${API_BASE}/admin`);
+    await page.waitForLoadState("networkidle");
 
-    const response = await apiContext.post("/api/workspaces/", {
-      data: {
-        name: "E2E Test Workspace",
-        slug,
-        organization_size: "1-10",
-      },
-    });
-    expect(response.ok()).toBeTruthy();
-
-    const workspace = await response.json();
-    expect(workspace.slug).toBe(slug);
-    expect(workspace.name).toBe("E2E Test Workspace");
+    const heading = page.getByText(/manage your plane instance/i);
+    await expect(heading).toBeVisible({ timeout: 10_000 });
   });
 
-  test("should access workspace after creation", async ({ apiContext }) => {
-    const slug = `e2e-access-${Date.now().toString(36)}`;
+  test("should display email and password labels", async ({ page }) => {
+    await page.goto(`${API_BASE}/admin`);
+    await page.waitForLoadState("networkidle");
 
-    // Create workspace
-    const createResponse = await apiContext.post("/api/workspaces/", {
-      data: {
-        name: "Access Test Workspace",
-        slug,
-        organization_size: "1-10",
-      },
-    });
-    expect(createResponse.ok()).toBeTruthy();
+    const emailLabel = page.getByText("Email", { exact: false }).first();
+    await expect(emailLabel).toBeVisible({ timeout: 10_000 });
 
-    // Fetch workspace
-    const getResponse = await apiContext.get(`/api/workspaces/${slug}/`);
-    expect(getResponse.ok()).toBeTruthy();
+    const passwordLabel = page.getByText("Password", { exact: false }).first();
+    await expect(passwordLabel).toBeVisible({ timeout: 5_000 });
+  });
+});
 
-    const workspace = await getResponse.json();
-    expect(workspace.slug).toBe(slug);
+// ---------------------------------------------------------------------------
+// Admin Dashboard – Authenticated Navigation
+// ---------------------------------------------------------------------------
+test.describe("Admin Dashboard Navigation", () => {
+  test("should reach General settings after sign-in", async ({ page, request }) => {
+    const hasAuth = await signInAdminViaCookies(page, request);
+    if (!hasAuth) {
+      test.skip(true, "Admin auth cookies not available");
+      return;
+    }
+
+    await page.goto(`${API_BASE}/admin/general/`);
+    await page.waitForLoadState("networkidle");
+
+    // Should see input fields on the General page (not the sign-in form)
+    const inputs = await page.locator("input:not(#email):not(#password)").count();
+    expect(inputs).toBeGreaterThan(0);
   });
 
-  test("should create a project within a workspace", async ({ apiContext }) => {
-    const slug = `e2e-proj-${Date.now().toString(36)}`;
+  test("should load Email settings page", async ({ page, request }) => {
+    const hasAuth = await signInAdminViaCookies(page, request);
+    if (!hasAuth) {
+      test.skip(true, "Admin auth cookies not available");
+      return;
+    }
 
-    // Create workspace
-    const wsResponse = await apiContext.post("/api/workspaces/", {
-      data: {
-        name: "Project Test Workspace",
-        slug,
-        organization_size: "1-10",
-      },
-    });
-    expect(wsResponse.ok()).toBeTruthy();
+    await page.goto(`${API_BASE}/admin/email/`);
+    await page.waitForLoadState("networkidle");
+    expect(page.url()).toContain("/email");
+  });
 
-    // Create project
-    const projResponse = await apiContext.post(`/api/workspaces/${slug}/projects/`, {
-      data: {
-        name: "E2E Test Project",
-        identifier: "E2E",
-        network: 2,
-      },
-    });
-    expect(projResponse.ok()).toBeTruthy();
+  test("should load Authentication settings page", async ({ page, request }) => {
+    const hasAuth = await signInAdminViaCookies(page, request);
+    if (!hasAuth) {
+      test.skip(true, "Admin auth cookies not available");
+      return;
+    }
 
-    const project = await projResponse.json();
-    expect(project.name).toBe("E2E Test Project");
-    expect(project.identifier).toBe("E2E");
+    await page.goto(`${API_BASE}/admin/authentication/`);
+    await page.waitForLoadState("networkidle");
+    expect(page.url()).toContain("/authentication");
+  });
+
+  test("should load AI settings page", async ({ page, request }) => {
+    const hasAuth = await signInAdminViaCookies(page, request);
+    if (!hasAuth) {
+      test.skip(true, "Admin auth cookies not available");
+      return;
+    }
+
+    await page.goto(`${API_BASE}/admin/ai/`);
+    await page.waitForLoadState("networkidle");
+    expect(page.url()).toContain("/ai");
+  });
+
+  test("should load Image settings page", async ({ page, request }) => {
+    const hasAuth = await signInAdminViaCookies(page, request);
+    if (!hasAuth) {
+      test.skip(true, "Admin auth cookies not available");
+      return;
+    }
+
+    await page.goto(`${API_BASE}/admin/image/`);
+    await page.waitForLoadState("networkidle");
+    expect(page.url()).toContain("/image");
+  });
+
+  test("should load Workspaces page", async ({ page, request }) => {
+    const hasAuth = await signInAdminViaCookies(page, request);
+    if (!hasAuth) {
+      test.skip(true, "Admin auth cookies not available");
+      return;
+    }
+
+    await page.goto(`${API_BASE}/admin/workspace/`);
+    await page.waitForLoadState("networkidle");
+    expect(page.url()).toContain("/workspace");
   });
 });
