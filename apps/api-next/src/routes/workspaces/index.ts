@@ -13,6 +13,7 @@ import {
   recentVisits,
   stickies,
   favorites,
+  workspaceUserPreferences,
 } from "../../db/schema/workspace";
 import { authMiddleware, ROLES } from "../../middleware/auth";
 import {
@@ -1058,50 +1059,131 @@ workspaceRoutes.get("/:slug/states/", async (c) => {
 // =====================================================
 
 // GET /api/workspaces/:slug/sidebar-preferences/ - Get sidebar preferences
+const SIDEBAR_PREF_KEYS = ["views", "active_cycles", "analytics", "drafts", "your_work", "archives", "stickies"];
+const DEFAULT_PINNED_KEYS = ["drafts", "your_work", "stickies"];
+
 workspaceRoutes.get("/:slug/sidebar-preferences/", async (c) => {
-  const membership = c.get("workspaceMembership");
-  if (!membership) return c.json({ detail: "Not found." }, 404);
+  const user = c.get("user");
+  const workspace = c.get("workspace");
+  if (!user || !workspace) return c.json({ detail: "Not found." }, 404);
 
-  const dbMembership = await db.query.workspaceMembers.findFirst({
-    where: eq(workspaceMembers.id, membership.id),
+  // Find existing preferences
+  const existingPrefs = await db.query.workspaceUserPreferences.findMany({
+    where: and(
+      eq(workspaceUserPreferences.workspaceId, workspace.id),
+      eq(workspaceUserPreferences.userId, user.id)
+    ),
   });
 
-  return c.json({
-    view_props: dbMembership?.viewProps ?? {},
-    default_props: dbMembership?.defaultProps ?? {},
+  const existingKeys = existingPrefs.map((p) => p.key);
+  const missingKeys = SIDEBAR_PREF_KEYS.filter((key) => !existingKeys.includes(key));
+
+  // Auto-create missing preferences
+  if (missingKeys.length > 0) {
+    const toCreate = missingKeys.map((key, i) => ({
+      workspaceId: workspace.id,
+      userId: user.id,
+      key,
+      isPinned: DEFAULT_PINNED_KEYS.includes(key),
+      sortOrder: 65535 + (i * 10000),
+    }));
+
+    await db.insert(workspaceUserPreferences).values(toCreate);
+  }
+
+  // Re-fetch and return as dict
+  const allPrefs = await db.query.workspaceUserPreferences.findMany({
+    where: and(
+      eq(workspaceUserPreferences.workspaceId, workspace.id),
+      eq(workspaceUserPreferences.userId, user.id)
+    ),
+    orderBy: [asc(workspaceUserPreferences.sortOrder)],
   });
+
+  const result: Record<string, { is_pinned: boolean; sort_order: number }> = {};
+  for (const pref of allPrefs) {
+    result[pref.key] = {
+      is_pinned: pref.isPinned ?? false,
+      sort_order: pref.sortOrder ?? 65535,
+    };
+  }
+
+  return c.json(result);
 });
 
-// PATCH /api/workspaces/:slug/sidebar-preferences/ - Update sidebar preferences
+// PATCH /api/workspaces/:slug/sidebar-preferences/ - Bulk update sidebar preferences
 workspaceRoutes.patch("/:slug/sidebar-preferences/", async (c) => {
-  const membership = c.get("workspaceMembership");
-  if (!membership) return c.json({ detail: "Not found." }, 404);
+  const user = c.get("user");
+  const workspace = c.get("workspace");
+  if (!user || !workspace) return c.json({ detail: "Not found." }, 404);
 
-  const body = await c.req.json() as {
-    view_props?: unknown;
-    default_props?: unknown;
-  };
+  const body = await c.req.json() as Array<{ key: string; is_pinned?: boolean; sort_order?: number }>;
 
-  const updateData: Record<string, unknown> = {
-    updatedAt: new Date(),
-  };
-
-  if (body.view_props !== undefined) {
-    updateData.viewProps = body.view_props;
-  }
-  if (body.default_props !== undefined) {
-    updateData.defaultProps = body.default_props;
+  if (!Array.isArray(body)) {
+    return c.json({ detail: "Expected an array of preferences." }, 400);
   }
 
-  await db.update(workspaceMembers).set(updateData).where(eq(workspaceMembers.id, membership.id));
+  for (const data of body) {
+    const key = data.key;
+    if (!key) continue;
 
-  const updated = await db.query.workspaceMembers.findFirst({
-    where: eq(workspaceMembers.id, membership.id),
+    const pref = await db.query.workspaceUserPreferences.findFirst({
+      where: and(
+        eq(workspaceUserPreferences.key, key),
+        eq(workspaceUserPreferences.workspaceId, workspace.id),
+        eq(workspaceUserPreferences.userId, user.id)
+      ),
+    });
+
+    if (!pref) continue;
+
+    const updateData: Record<string, unknown> = { updatedAt: new Date() };
+    if (data.is_pinned !== undefined) updateData.isPinned = data.is_pinned;
+    if (data.sort_order !== undefined) updateData.sortOrder = data.sort_order;
+
+    await db.update(workspaceUserPreferences)
+      .set(updateData)
+      .where(eq(workspaceUserPreferences.id, pref.id));
+  }
+
+  return c.json({ message: "Successfully updated" });
+});
+
+// PATCH /api/workspaces/:slug/sidebar-preferences/:key/ - Update single sidebar preference
+workspaceRoutes.patch("/:slug/sidebar-preferences/:key/", async (c) => {
+  const user = c.get("user");
+  const workspace = c.get("workspace");
+  const key = c.req.param("key");
+  if (!user || !workspace) return c.json({ detail: "Not found." }, 404);
+
+  const body = await c.req.json() as { is_pinned?: boolean; sort_order?: number };
+
+  const pref = await db.query.workspaceUserPreferences.findFirst({
+    where: and(
+      eq(workspaceUserPreferences.key, key),
+      eq(workspaceUserPreferences.workspaceId, workspace.id),
+      eq(workspaceUserPreferences.userId, user.id)
+    ),
+  });
+
+  if (!pref) return c.json({ detail: "Preference not found" }, 404);
+
+  const updateData: Record<string, unknown> = { updatedAt: new Date() };
+  if (body.is_pinned !== undefined) updateData.isPinned = body.is_pinned;
+  if (body.sort_order !== undefined) updateData.sortOrder = body.sort_order;
+
+  await db.update(workspaceUserPreferences)
+    .set(updateData)
+    .where(eq(workspaceUserPreferences.id, pref.id));
+
+  const updated = await db.query.workspaceUserPreferences.findFirst({
+    where: eq(workspaceUserPreferences.id, pref.id),
   });
 
   return c.json({
-    view_props: updated?.viewProps ?? {},
-    default_props: updated?.defaultProps ?? {},
+    key: updated!.key,
+    is_pinned: updated!.isPinned ?? false,
+    sort_order: updated!.sortOrder ?? 65535,
   });
 });
 
@@ -3176,7 +3258,8 @@ function formatStickyResponse(sticky: typeof stickies.$inferSelect) {
   };
 }
 
-// GET /api/workspaces/:slug/stickies/ - List stickies with cursor-based pagination
+// GET /api/workspaces/:slug/stickies/ - List stickies with offset-based pagination
+// Cursor format: "perPage:pageOffset:isPrev" (e.g., "20:0:0" for first page of 20 items)
 workspaceRoutes.get("/:slug/stickies/", async (c) => {
   const user = c.get("user");
   if (!user) return c.json({ detail: "Authentication required." }, 401);
@@ -3187,7 +3270,24 @@ workspaceRoutes.get("/:slug/stickies/", async (c) => {
   const query = c.req.query("query");
   const perPageParam = c.req.query("per_page");
   const cursor = c.req.query("cursor");
-  const perPage = Math.min(Math.max(parseInt(perPageParam || "20", 10) || 20, 1), 100);
+
+  // Parse cursor format: "perPage:pageOffset:isPrev"
+  let perPage = Math.min(Math.max(parseInt(perPageParam || "20", 10) || 20, 1), 100);
+  let pageOffset = 0;
+
+  if (cursor) {
+    const parts = cursor.split(":");
+    if (parts.length === 3) {
+      const cursorPerPage = parseInt(parts[0]!, 10);
+      const cursorOffset = parseInt(parts[1]!, 10);
+      if (!isNaN(cursorPerPage) && cursorPerPage > 0) {
+        perPage = Math.min(cursorPerPage, 100);
+      }
+      if (!isNaN(cursorOffset) && cursorOffset >= 0) {
+        pageOffset = cursorOffset;
+      }
+    }
+  }
 
   // Base conditions: user's stickies in this workspace
   const conditions: ReturnType<typeof eq>[] = [
@@ -3200,28 +3300,15 @@ workspaceRoutes.get("/:slug/stickies/", async (c) => {
     conditions.push(like(stickies.descriptionStripped, `%${query}%`));
   }
 
-  // Cursor-based pagination: cursor is the sort_order value to paginate from
-  if (cursor) {
-    const cursorValue = parseFloat(cursor);
-    if (!isNaN(cursorValue)) {
-      conditions.push(lt(stickies.sortOrder, cursorValue));
-    }
-  }
-
-  // Get total count (without cursor filter for accurate total)
-  const baseConditions: ReturnType<typeof eq>[] = [
-    eq(stickies.workspaceId, workspace.id),
-    eq(stickies.userId, user.id),
-  ];
-  if (query) {
-    baseConditions.push(like(stickies.descriptionStripped, `%${query}%`));
-  }
-
+  // Get total count
   const totalResult = await db
     .select({ total: count() })
     .from(stickies)
-    .where(and(...baseConditions));
+    .where(and(...conditions));
   const totalCount = Number(totalResult[0]?.total ?? 0);
+
+  // Calculate offset
+  const offset = pageOffset * perPage;
 
   // Fetch page + 1 to determine if there's a next page
   const results = await db
@@ -3229,20 +3316,23 @@ workspaceRoutes.get("/:slug/stickies/", async (c) => {
     .from(stickies)
     .where(and(...conditions))
     .orderBy(desc(stickies.sortOrder))
+    .offset(offset)
     .limit(perPage + 1);
 
   const hasNext = results.length > perPage;
   const pageResults = results.slice(0, perPage);
-  const nextCursor = hasNext && pageResults.length > 0
-    ? String(pageResults[pageResults.length - 1]!.sortOrder)
-    : null;
+  const hasPrev = pageOffset > 0;
+
+  // Build cursor strings in Django format
+  const nextCursor = `${perPage}:${pageOffset + 1}:0`;
+  const prevCursor = `${perPage}:${pageOffset - 1}:1`;
 
   // Return paginated response matching Django's paginate() format
   return c.json({
     next_cursor: nextCursor,
-    prev_cursor: cursor ?? null,
+    prev_cursor: prevCursor,
     next_page_results: hasNext,
-    prev_page_results: !!cursor,
+    prev_page_results: hasPrev,
     total_pages: Math.ceil(totalCount / perPage),
     total_count: totalCount,
     results: pageResults.map(formatStickyResponse),
@@ -3391,8 +3481,310 @@ workspaceRoutes.delete("/:slug/stickies/:id/", async (c) => {
 });
 
 // Dashboard
+// The dashboard widget system was deprecated in Django but the frontend service layer still references it.
+// We provide virtual dashboard/widget objects for compatibility.
+
+const DASHBOARD_WIDGET_KEYS = [
+  "overview_stats",
+  "assigned_issues",
+  "created_issues",
+  "issues_by_state_groups",
+  "issues_by_priority",
+  "recent_activity",
+  "recent_projects",
+  "recent_collaborators",
+] as const;
+
+const DEFAULT_WIDGET_FILTERS: Record<string, Record<string, unknown>> = {
+  assigned_issues: { duration: "this_week", tab: "pending" },
+  created_issues: { duration: "this_week", tab: "pending" },
+  issues_by_state_groups: {},
+  issues_by_priority: {},
+  overview_stats: {},
+  recent_activity: {},
+  recent_projects: {},
+  recent_collaborators: {},
+};
+
+// GET /api/workspaces/:slug/dashboard/?dashboard_type=home
+// Returns a virtual dashboard with default widgets for the current user
 workspaceRoutes.get("/:slug/dashboard/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
+  const user = c.get("user");
+  const workspace = c.get("workspace");
+  if (!user || !workspace) return c.json({ detail: "Not found." }, 404);
+
+  const dashboardType = c.req.query("dashboard_type") || "home";
+
+  // Generate a deterministic dashboard ID from workspace + user
+  const dashboardId = `dashboard-${workspace.id}-${user.id}`;
+
+  const dashboard = {
+    id: dashboardId,
+    name: "Home",
+    description_html: "<p></p>",
+    identifier: null,
+    is_default: true,
+    type: dashboardType,
+    owned_by: user.id,
+    created_by: user.id,
+    updated_by: user.id,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  const widgets = DASHBOARD_WIDGET_KEYS.map((key, i) => ({
+    id: `widget-${dashboardId}-${key}`,
+    key,
+    is_visible: true,
+    sort_order: 65535 + i * 1000,
+    widget_filters: DEFAULT_WIDGET_FILTERS[key] ?? {},
+    filters: DEFAULT_WIDGET_FILTERS[key] ?? {},
+  }));
+
+  return c.json({ dashboard, widgets });
+});
+
+// GET /api/workspaces/:slug/dashboard/:dashboardId/ - Widget stats
+workspaceRoutes.get("/:slug/dashboard/:dashboardId/", async (c) => {
+  const user = c.get("user");
+  const workspace = c.get("workspace");
+  if (!user || !workspace) return c.json({ detail: "Not found." }, 404);
+
+  const widgetKey = c.req.query("widget_key");
+  if (!widgetKey) return c.json({ detail: "widget_key is required" }, 400);
+
+  const now = new Date();
+  const threeMonthsAgo = new Date(now);
+  threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
+
+  switch (widgetKey) {
+    case "overview_stats": {
+      // Count assigned, completed, created, pending issues
+      const assignedIssueIds = await db
+        .select({ issueId: issueAssignees.issueId })
+        .from(issueAssignees)
+        .innerJoin(issues, eq(issues.id, issueAssignees.issueId))
+        .where(and(eq(issueAssignees.assigneeId, user.id), eq(issues.workspaceId, workspace.id), isNull(issues.archivedAt)));
+
+      const assignedIds = assignedIssueIds.map((r) => r.issueId);
+
+      if (assignedIds.length === 0) {
+        return c.json({
+          assigned_issues_count: 0,
+          completed_issues_count: 0,
+          created_issues_count: 0,
+          pending_issues_count: 0,
+        });
+      }
+
+      const completedCount = await db
+        .select({ count: count() })
+        .from(issues)
+        .innerJoin(states, eq(states.id, issues.stateId))
+        .where(and(inArray(issues.id, assignedIds), eq(states.group, "completed")));
+
+      const pendingCount = await db
+        .select({ count: count() })
+        .from(issues)
+        .innerJoin(states, eq(states.id, issues.stateId))
+        .where(and(inArray(issues.id, assignedIds), not(inArray(states.group, ["completed", "cancelled"]))));
+
+      const createdCount = await db
+        .select({ count: count() })
+        .from(issues)
+        .where(and(eq(issues.workspaceId, workspace.id), eq(issues.createdById, user.id), isNull(issues.archivedAt)));
+
+      return c.json({
+        assigned_issues_count: assignedIds.length,
+        completed_issues_count: completedCount[0]?.count ?? 0,
+        created_issues_count: createdCount[0]?.count ?? 0,
+        pending_issues_count: pendingCount[0]?.count ?? 0,
+      });
+    }
+
+    case "assigned_issues":
+    case "created_issues": {
+      const issueType = c.req.query("issue_type") || "pending";
+      const targetDate = c.req.query("target_date");
+
+      let baseQuery;
+      if (widgetKey === "assigned_issues") {
+        // Get issues assigned to user
+        const assignedIssueIds = await db
+          .select({ issueId: issueAssignees.issueId })
+          .from(issueAssignees)
+          .innerJoin(issues, eq(issues.id, issueAssignees.issueId))
+          .where(and(eq(issueAssignees.assigneeId, user.id), eq(issues.workspaceId, workspace.id), isNull(issues.archivedAt)));
+        const assignedIds = assignedIssueIds.map((r) => r.issueId);
+        if (assignedIds.length === 0) return c.json({ issues: [], count: 0 });
+        baseQuery = and(inArray(issues.id, assignedIds));
+      } else {
+        baseQuery = and(eq(issues.workspaceId, workspace.id), eq(issues.createdById, user.id), isNull(issues.archivedAt));
+      }
+
+      let stateFilter;
+      switch (issueType) {
+        case "completed":
+          stateFilter = eq(states.group, "completed");
+          break;
+        case "overdue":
+          stateFilter = and(not(inArray(states.group, ["completed", "cancelled"])), lt(issues.targetDate, now), isNull(issues.completedAt));
+          break;
+        case "upcoming":
+          stateFilter = and(not(inArray(states.group, ["completed", "cancelled"])), gte(issues.startDate, now), isNull(issues.completedAt));
+          break;
+        default: // pending
+          stateFilter = not(inArray(states.group, ["completed", "cancelled"]));
+          break;
+      }
+
+      const matchingIssues = await db
+        .select({
+          id: issues.id,
+          name: issues.name,
+          priority: issues.priority,
+          projectId: issues.projectId,
+          stateId: issues.stateId,
+          targetDate: issues.targetDate,
+          startDate: issues.startDate,
+          sequenceId: issues.sequenceId,
+          sortOrder: issues.sortOrder,
+          completedAt: issues.completedAt,
+          createdAt: issues.createdAt,
+        })
+        .from(issues)
+        .innerJoin(states, eq(states.id, issues.stateId))
+        .where(and(baseQuery!, stateFilter))
+        .orderBy(desc(issues.createdAt))
+        .limit(20);
+
+      return c.json({
+        issues: matchingIssues.map((issue) => ({
+          id: issue.id,
+          name: issue.name,
+          priority: issue.priority,
+          project_id: issue.projectId,
+          state_id: issue.stateId,
+          target_date: issue.targetDate ? new Date(issue.targetDate as unknown as number * 1000).toISOString().split("T")[0] : null,
+          start_date: issue.startDate ? new Date(issue.startDate as unknown as number * 1000).toISOString().split("T")[0] : null,
+          sequence_id: issue.sequenceId,
+          sort_order: issue.sortOrder,
+          completed_at: issue.completedAt ? new Date(issue.completedAt as unknown as number * 1000).toISOString() : null,
+          created_at: issue.createdAt ? new Date(issue.createdAt as unknown as number * 1000).toISOString() : null,
+        })),
+        count: matchingIssues.length,
+      });
+    }
+
+    case "issues_by_state_groups": {
+      const stateGroups = await db
+        .select({
+          group: states.group,
+          count: count(),
+        })
+        .from(issues)
+        .innerJoin(issueAssignees, eq(issueAssignees.issueId, issues.id))
+        .innerJoin(states, eq(states.id, issues.stateId))
+        .where(and(eq(issueAssignees.assigneeId, user.id), eq(issues.workspaceId, workspace.id), isNull(issues.archivedAt)))
+        .groupBy(states.group);
+
+      return c.json(
+        stateGroups.map((sg) => ({
+          state: sg.group,
+          count: sg.count,
+        }))
+      );
+    }
+
+    case "issues_by_priority": {
+      const priorityGroups = await db
+        .select({
+          priority: issues.priority,
+          count: count(),
+        })
+        .from(issues)
+        .innerJoin(issueAssignees, eq(issueAssignees.issueId, issues.id))
+        .where(and(eq(issueAssignees.assigneeId, user.id), eq(issues.workspaceId, workspace.id), isNull(issues.archivedAt)))
+        .groupBy(issues.priority);
+
+      const priorityMap: Record<number, string> = { 0: "none", 1: "urgent", 2: "high", 3: "medium", 4: "low" };
+      return c.json(
+        priorityGroups.map((pg) => ({
+          priority: priorityMap[pg.priority ?? 0] ?? "none",
+          count: pg.count,
+        }))
+      );
+    }
+
+    case "recent_activity": {
+      const activities = await db.query.issueActivities.findMany({
+        where: and(eq(issueActivities.actorId, user.id), eq(issueActivities.workspaceId, workspace.id)),
+        orderBy: [desc(issueActivities.createdAt)],
+        limit: 20,
+      });
+
+      return c.json(
+        activities.map((a) => ({
+          id: a.id,
+          issue_id: a.issueId,
+          project_id: a.projectId,
+          workspace_id: a.workspaceId,
+          actor_id: a.actorId,
+          field: a.field,
+          old_value: a.oldValue,
+          new_value: a.newValue,
+          verb: a.verb,
+          created_at: a.createdAt ? new Date(a.createdAt as unknown as number * 1000).toISOString() : null,
+        }))
+      );
+    }
+
+    case "recent_projects": {
+      // Return project IDs from recent visits
+      const recentProjectVisits = await db.query.recentVisits.findMany({
+        where: and(
+          eq(recentVisits.userId, user.id),
+          eq(recentVisits.workspaceId, workspace.id),
+          eq(recentVisits.entityType, "project")
+        ),
+        orderBy: [desc(recentVisits.visitedAt)],
+        limit: 5,
+      });
+
+      return c.json(recentProjectVisits.map((v) => v.entityId));
+    }
+
+    case "recent_collaborators": {
+      const perPage = parseInt(c.req.query("per_page") || "10");
+      const cursor = c.req.query("cursor") || `${perPage}:0:0`;
+      const [, offsetStr] = cursor.split(":");
+      const offset = parseInt(offsetStr || "0");
+
+      // Find unique collaborators from issues assigned to user
+      const collaborators = await db
+        .select({
+          userId: issueAssignees.assigneeId,
+          count: count(),
+        })
+        .from(issueAssignees)
+        .innerJoin(issues, eq(issues.id, issueAssignees.issueId))
+        .where(and(eq(issues.workspaceId, workspace.id), isNull(issues.archivedAt)))
+        .groupBy(issueAssignees.assigneeId)
+        .orderBy(desc(count()))
+        .limit(perPage)
+        .offset(offset);
+
+      return c.json(
+        collaborators.map((c) => ({
+          user_id: c.userId,
+          active_issue_count: c.count,
+        }))
+      );
+    }
+
+    default:
+      return c.json({ detail: `Unknown widget_key: ${widgetKey}` }, 400);
+  }
 });
 
 // Analytics
