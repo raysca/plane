@@ -252,15 +252,9 @@ function formatProject(p: typeof projects.$inferSelect, extra?: {
 function formatMember(m: typeof projectMembers.$inferSelect, user: typeof users.$inferSelect) {
   return {
     id: m.id,
-    member: {
-      id: user.id,
-      email: user.email,
-      first_name: user.firstName ?? "",
-      last_name: user.lastName ?? "",
-      display_name: user.displayName ?? user.name ?? "",
-      avatar: user.avatar ?? user.image ?? "",
-    },
+    member: user.id,  // Return user ID string, not object - frontend expects this format
     role: m.role,
+    original_role: m.role,  // Frontend filter requires this field
     is_active: m.isActive ?? true,
     view_props: m.viewProps ?? {},
     default_props: m.defaultProps ?? {},
