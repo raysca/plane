@@ -286,6 +286,31 @@ export const workspaceHomePreferences = sqliteTable(
   ]
 );
 
+// Workspace User Preferences (sidebar navigation)
+export const workspaceUserPreferences = sqliteTable(
+  "workspace_user_preferences",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    key: text("key").notNull(),
+    isPinned: integer("is_pinned", { mode: "boolean" }).default(false),
+    sortOrder: real("sort_order").default(65535),
+    createdAt: integer("created_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+  },
+  (table) => [
+    unique("workspace_user_pref_unique").on(table.workspaceId, table.userId, table.key),
+    index("workspace_user_pref_user_workspace_idx").on(table.userId, table.workspaceId),
+  ]
+);
+
 // Workspace User Properties
 export const workspaceUserProperties = sqliteTable(
   "workspace_user_properties",
@@ -328,6 +353,7 @@ export const workspacesRelations = relations(workspaces, ({ one, many }) => ({
   quickLinks: many(quickLinks),
   stickies: many(stickies),
   homePreferences: many(workspaceHomePreferences),
+  userPreferences: many(workspaceUserPreferences),
   userProperties: many(workspaceUserProperties),
 }));
 
@@ -404,6 +430,17 @@ export const workspaceHomePreferencesRelations = relations(workspaceHomePreferen
   }),
   user: one(users, {
     fields: [workspaceHomePreferences.userId],
+    references: [users.id],
+  }),
+}));
+
+export const workspaceUserPreferencesRelations = relations(workspaceUserPreferences, ({ one }) => ({
+  workspace: one(workspaces, {
+    fields: [workspaceUserPreferences.workspaceId],
+    references: [workspaces.id],
+  }),
+  user: one(users, {
+    fields: [workspaceUserPreferences.userId],
     references: [users.id],
   }),
 }));

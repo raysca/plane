@@ -4,6 +4,11 @@ import { users, userProfiles } from "../db/schema/user";
 import {
     workspaces,
     workspaceMembers,
+    workspaceHomePreferences,
+    workspaceUserPreferences,
+    quickLinks,
+    stickies,
+    recentVisits,
 } from "../db/schema/workspace";
 import {
     projects,
@@ -549,6 +554,151 @@ export async function seedWorkspace(workspaceId: string, userId: string) {
                 const projectId = seed.project_id ? projectMap[seed.project_id] : undefined;
 
                 await seedPage(seed, workspace.id, projectId, userId, null, labelMap);
+            }
+        }
+
+        // 10. Create Home Widget Preferences
+        const homeWidgetKeys = ["quick_links", "recents", "my_stickies"];
+        const existingHomePrefs = await db.query.workspaceHomePreferences.findMany({
+            where: (hp, { and, eq: e }) =>
+                and(e(hp.workspaceId, workspace.id), e(hp.userId, userId)),
+        });
+        const existingHomeKeys = existingHomePrefs.map((p) => p.key);
+        const missingHomeKeys = homeWidgetKeys.filter((k) => !existingHomeKeys.includes(k));
+
+        if (missingHomeKeys.length > 0) {
+            await db.insert(workspaceHomePreferences).values(
+                missingHomeKeys.map((key, i) => ({
+                    workspaceId: workspace.id,
+                    userId,
+                    key,
+                    isEnabled: true,
+                    sortOrder: 1000 - (i + 1),
+                }))
+            );
+            console.log(`[Seeder] Created ${missingHomeKeys.length} home widget preferences`);
+        }
+
+        // 11. Create Sidebar Preferences
+        const sidebarKeys = ["views", "active_cycles", "analytics", "drafts", "your_work", "archives", "stickies"];
+        const defaultPinnedKeys = ["drafts", "your_work", "stickies"];
+        const existingSidebarPrefs = await db.query.workspaceUserPreferences.findMany({
+            where: (sp, { and, eq: e }) =>
+                and(e(sp.workspaceId, workspace.id), e(sp.userId, userId)),
+        });
+        const existingSidebarKeys = existingSidebarPrefs.map((p) => p.key);
+        const missingSidebarKeys = sidebarKeys.filter((k) => !existingSidebarKeys.includes(k));
+
+        if (missingSidebarKeys.length > 0) {
+            await db.insert(workspaceUserPreferences).values(
+                missingSidebarKeys.map((key, i) => ({
+                    workspaceId: workspace.id,
+                    userId,
+                    key,
+                    isPinned: defaultPinnedKeys.includes(key),
+                    sortOrder: 65535 + (i * 10000),
+                }))
+            );
+            console.log(`[Seeder] Created ${missingSidebarKeys.length} sidebar preferences`);
+        }
+
+        // 12. Create Quick Links
+        const existingLinks = await db.query.quickLinks.findMany({
+            where: (ql, { and, eq: e }) =>
+                and(e(ql.workspaceId, workspace.id), e(ql.userId, userId)),
+        });
+
+        if (existingLinks.length === 0) {
+            const seedLinks = [
+                { name: "Plane Docs", url: "https://docs.plane.so", description: "Official Plane documentation" },
+                { name: "GitHub Repo", url: "https://github.com/makeplane/plane", description: "Plane source code on GitHub" },
+                { name: "Plane Community", url: "https://discord.com/invite/A92xrEGCge", description: "Join the Plane Discord community" },
+            ];
+
+            await db.insert(quickLinks).values(
+                seedLinks.map((link, i) => ({
+                    workspaceId: workspace.id,
+                    userId,
+                    name: link.name,
+                    url: link.url,
+                    description: link.description,
+                    sortOrder: (i + 1) * 10000,
+                }))
+            );
+            console.log(`[Seeder] Created ${seedLinks.length} quick links`);
+        }
+
+        // 13. Create Stickies
+        const existingStickies = await db.query.stickies.findMany({
+            where: (s, { and, eq: e }) =>
+                and(e(s.workspaceId, workspace.id), e(s.userId, userId)),
+        });
+
+        if (existingStickies.length === 0) {
+            const seedStickies = [
+                {
+                    name: "Welcome to Plane!",
+                    descriptionHtml: "<p>This is your workspace sticky note. Use stickies to jot down quick thoughts, reminders, or ideas.</p>",
+                    descriptionStripped: "This is your workspace sticky note. Use stickies to jot down quick thoughts, reminders, or ideas.",
+                    color: "#FEF3C7",
+                },
+                {
+                    name: "Sprint Goals",
+                    descriptionHtml: "<p>Track your sprint goals here:</p><ul><li>Complete onboarding flow</li><li>Ship dashboard improvements</li><li>Review pending PRs</li></ul>",
+                    descriptionStripped: "Track your sprint goals here: Complete onboarding flow, Ship dashboard improvements, Review pending PRs",
+                    color: "#DBEAFE",
+                },
+            ];
+
+            await db.insert(stickies).values(
+                seedStickies.map((sticky, i) => ({
+                    workspaceId: workspace.id,
+                    userId,
+                    name: sticky.name,
+                    descriptionHtml: sticky.descriptionHtml,
+                    descriptionStripped: sticky.descriptionStripped,
+                    color: sticky.color,
+                    sortOrder: (i + 1) * 10000,
+                }))
+            );
+            console.log(`[Seeder] Created ${seedStickies.length} stickies`);
+        }
+
+        // 14. Create Recent Visits (for projects and some issues)
+        const existingVisits = await db.query.recentVisits.findMany({
+            where: (rv, { and, eq: e }) =>
+                and(e(rv.workspaceId, workspace.id), e(rv.userId, userId)),
+        });
+
+        if (existingVisits.length === 0) {
+            const visitEntries: Array<{ entityType: string; entityId: string }> = [];
+
+            // Add project visits
+            for (const [, projectId] of Object.entries(projectMap)) {
+                visitEntries.push({ entityType: "project", entityId: projectId });
+            }
+
+            // Add some issue visits (first 3 issues)
+            const recentIssues = await db.query.issues.findMany({
+                where: eq(issues.workspaceId, workspace.id),
+                limit: 3,
+            });
+            for (const issue of recentIssues) {
+                visitEntries.push({ entityType: "issue", entityId: issue.id });
+            }
+
+            if (visitEntries.length > 0) {
+                const now = Date.now();
+                await db.insert(recentVisits).values(
+                    visitEntries.map((entry, i) => ({
+                        workspaceId: workspace.id,
+                        userId,
+                        entityType: entry.entityType,
+                        entityId: entry.entityId,
+                        visitedAt: new Date(now - i * 60000), // Stagger by 1 minute each
+                    }))
+                );
+                console.log(`[Seeder] Created ${visitEntries.length} recent visits`);
             }
         }
 

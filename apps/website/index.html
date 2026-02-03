@@ -1,0 +1,1042 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Plane Lite - Lightning Fast Project Management</title>
+  <meta name="description" content="A single-binary project management solution powered by Bun. No external dependencies. Deploy anywhere in seconds.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Navigation -->
+  <nav class="nav" id="nav">
+    <div class="nav-container">
+      <a href="#" class="nav-logo">
+        <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect width="32" height="32" rx="8" fill="url(#logo-gradient)"/>
+          <path d="M8 12L16 8L24 12V20L16 24L8 20V12Z" stroke="white" stroke-width="2" stroke-linejoin="round"/>
+          <path d="M16 14V18M14 16H18" stroke="white" stroke-width="2" stroke-linecap="round"/>
+          <defs>
+            <linearGradient id="logo-gradient" x1="0" y1="0" x2="32" y2="32">
+              <stop stop-color="#3B82F6"/>
+              <stop offset="1" stop-color="#8B5CF6"/>
+            </linearGradient>
+          </defs>
+        </svg>
+        <span>Plane <span class="text-gradient">Lite</span></span>
+      </a>
+      <div class="nav-links">
+        <a href="#features">Features</a>
+        <a href="#comparison">Compare</a>
+        <a href="#deploy-options">Infrastructure</a>
+        <a href="#deployment">Deploy</a>
+        <a href="https://github.com/makeplane/plane" target="_blank" class="nav-github">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+          </svg>
+          Star on GitHub
+        </a>
+      </div>
+      <button class="nav-toggle" id="nav-toggle" aria-label="Toggle menu">
+        <span></span>
+        <span></span>
+        <span></span>
+      </button>
+    </div>
+  </nav>
+
+  <!-- Mobile Menu -->
+  <div class="mobile-menu" id="mobile-menu">
+    <a href="#features">Features</a>
+    <a href="#comparison">Compare</a>
+    <a href="#deploy-options">Infrastructure</a>
+    <a href="#deployment">Deploy</a>
+    <a href="https://github.com/makeplane/plane" target="_blank">GitHub</a>
+  </div>
+
+  <!-- Hero Section -->
+  <section class="hero">
+    <div class="hero-bg">
+      <div class="hero-grid"></div>
+      <div class="hero-glow"></div>
+    </div>
+    <div class="container">
+      <div class="hero-badge">
+        <span class="badge-dot"></span>
+        Now powered by Bun &mdash; 10x faster than Node.js
+      </div>
+      <h1 class="hero-title">
+        Project Management<br>
+        <span class="text-gradient">Without the Bloat</span>
+      </h1>
+      <p class="hero-subtitle">
+        A single binary. Zero external dependencies. Deploy to any cloud in under 60 seconds.
+        <br>Perfect for teams of up to 200 people who value speed and simplicity.
+      </p>
+      <div class="hero-actions">
+        <a href="#deployment" class="btn btn-primary">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+          </svg>
+          Deploy Now
+        </a>
+        <a href="#features" class="btn btn-secondary">
+          Learn More
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M5 12h14M12 5l7 7-7 7"/>
+          </svg>
+        </a>
+      </div>
+      <div class="hero-stats">
+        <div class="stat">
+          <span class="stat-value" data-count="50">0</span><span class="stat-suffix">MB</span>
+          <span class="stat-label">Binary Size</span>
+        </div>
+        <div class="stat-divider"></div>
+        <div class="stat">
+          <span class="stat-value" data-count="200">0</span><span class="stat-suffix">+</span>
+          <span class="stat-label">Team Members</span>
+        </div>
+        <div class="stat-divider"></div>
+        <div class="stat">
+          <span class="stat-value" data-count="0">0</span>
+          <span class="stat-label">External Services</span>
+        </div>
+        <div class="stat-divider"></div>
+        <div class="stat">
+          <span class="stat-value" data-count="60">0</span><span class="stat-suffix">s</span>
+          <span class="stat-label">Deploy Time</span>
+        </div>
+      </div>
+    </div>
+    <div class="hero-visual">
+      <div class="terminal">
+        <div class="terminal-header">
+          <div class="terminal-dots">
+            <span></span><span></span><span></span>
+          </div>
+          <span class="terminal-title">Terminal</span>
+        </div>
+        <div class="terminal-body">
+          <div class="terminal-line" data-delay="0">
+            <span class="terminal-prompt">$</span>
+            <span class="terminal-command">docker run -d -p 3000:3000 plane/lite</span>
+          </div>
+          <div class="terminal-line" data-delay="500">
+            <span class="terminal-output">Pulling plane/lite:latest...</span>
+          </div>
+          <div class="terminal-line" data-delay="1200">
+            <span class="terminal-output success">✓ Container started in 847ms</span>
+          </div>
+          <div class="terminal-line" data-delay="1800">
+            <span class="terminal-output success">✓ Server running at http://localhost:3000</span>
+          </div>
+          <div class="terminal-line" data-delay="2400">
+            <span class="terminal-output muted">Ready to manage your projects!</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Logos Section -->
+  <section class="logos">
+    <div class="container">
+      <p class="logos-title">Trusted by engineering teams worldwide</p>
+      <div class="logos-grid">
+        <div class="logo-item">Startup A</div>
+        <div class="logo-item">TechCorp</div>
+        <div class="logo-item">DevStudio</div>
+        <div class="logo-item">CloudBase</div>
+        <div class="logo-item">DataFlow</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features Section -->
+  <section class="features" id="features">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-badge">Features</span>
+        <h2 class="section-title">Everything you need.<br><span class="text-gradient">Nothing you don't.</span></h2>
+        <p class="section-subtitle">Built from the ground up for simplicity and speed. No bloated features, no complex setup, no maintenance headaches.</p>
+      </div>
+
+      <div class="features-grid">
+        <div class="feature-card feature-large">
+          <div class="feature-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+            </svg>
+          </div>
+          <h3>Blazing Fast Performance</h3>
+          <p>Powered by Bun runtime with SQLite storage. Cold starts in milliseconds, responses in microseconds. No waiting, ever.</p>
+          <div class="feature-metrics">
+            <div class="metric">
+              <span class="metric-value">~3ms</span>
+              <span class="metric-label">API Response</span>
+            </div>
+            <div class="metric">
+              <span class="metric-value">~100ms</span>
+              <span class="metric-label">Cold Start</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <rect x="2" y="3" width="20" height="14" rx="2"/>
+              <path d="M8 21h8M12 17v4"/>
+            </svg>
+          </div>
+          <h3>Single Binary</h3>
+          <p>One file. That's it. No runtime dependencies, no package managers, no complex installations.</p>
+        </div>
+
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+            </svg>
+          </div>
+          <h3>Embedded Database</h3>
+          <p>SQLite with WAL mode provides ACID compliance and concurrent access. No PostgreSQL or Redis required.</p>
+        </div>
+
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/>
+              <circle cx="9" cy="7" r="4"/>
+              <path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/>
+            </svg>
+          </div>
+          <h3>Team Ready</h3>
+          <p>Built for teams up to 200 members with workspaces, projects, roles, and granular permissions.</p>
+        </div>
+
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <rect x="3" y="3" width="18" height="18" rx="2"/>
+              <path d="M3 9h18M9 21V9"/>
+            </svg>
+          </div>
+          <h3>Modern UI</h3>
+          <p>Kanban boards, list views, calendar, and timeline. Drag-and-drop everything. Dark mode included.</p>
+        </div>
+
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <circle cx="12" cy="12" r="10"/>
+              <path d="M12 6v6l4 2"/>
+            </svg>
+          </div>
+          <h3>Cycles & Modules</h3>
+          <p>Sprint planning with cycles. Feature grouping with modules. Time tracking built-in.</p>
+        </div>
+
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+              <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>
+            </svg>
+          </div>
+          <h3>Pages & Docs</h3>
+          <p>Rich text documents with real-time collaboration. Embed anywhere, link to issues.</p>
+        </div>
+
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            </svg>
+          </div>
+          <h3>Self-Hosted Security</h3>
+          <p>Your data never leaves your infrastructure. Full control, full privacy, full compliance.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Comparison Section -->
+  <section class="comparison" id="comparison">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-badge">Compare</span>
+        <h2 class="section-title">How we stack up against<br><span class="text-gradient">the competition</span></h2>
+        <p class="section-subtitle">See why teams are switching to Plane Lite for their project management needs.</p>
+      </div>
+
+      <div class="comparison-table-wrapper">
+        <table class="comparison-table">
+          <thead>
+            <tr>
+              <th>Feature</th>
+              <th class="highlight">
+                <div class="product-header">
+                  <span class="product-badge">Recommended</span>
+                  Plane Lite
+                </div>
+              </th>
+              <th>Jira</th>
+              <th>Linear</th>
+              <th>OpenProject</th>
+              <th>Taiga</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Self-hosted</td>
+              <td class="highlight"><span class="check">✓</span></td>
+              <td><span class="check">✓</span> Data Center</td>
+              <td><span class="cross">✗</span></td>
+              <td><span class="check">✓</span></td>
+              <td><span class="check">✓</span></td>
+            </tr>
+            <tr>
+              <td>Single binary deployment</td>
+              <td class="highlight"><span class="check">✓</span></td>
+              <td><span class="cross">✗</span></td>
+              <td><span class="cross">✗</span></td>
+              <td><span class="cross">✗</span></td>
+              <td><span class="cross">✗</span></td>
+            </tr>
+            <tr>
+              <td>No external database</td>
+              <td class="highlight"><span class="check">✓</span> SQLite</td>
+              <td><span class="cross">✗</span> PostgreSQL</td>
+              <td>N/A (SaaS)</td>
+              <td><span class="cross">✗</span> PostgreSQL</td>
+              <td><span class="cross">✗</span> PostgreSQL</td>
+            </tr>
+            <tr>
+              <td>No Redis/cache service</td>
+              <td class="highlight"><span class="check">✓</span></td>
+              <td><span class="cross">✗</span></td>
+              <td>N/A</td>
+              <td><span class="check">✓</span></td>
+              <td><span class="cross">✗</span></td>
+            </tr>
+            <tr>
+              <td>Docker image size</td>
+              <td class="highlight"><span class="value">~50MB</span></td>
+              <td><span class="value">~2GB</span></td>
+              <td>N/A</td>
+              <td><span class="value">~800MB</span></td>
+              <td><span class="value">~600MB</span></td>
+            </tr>
+            <tr>
+              <td>Memory usage</td>
+              <td class="highlight"><span class="value">~64MB</span></td>
+              <td><span class="value">4GB+</span></td>
+              <td>N/A</td>
+              <td><span class="value">1GB+</span></td>
+              <td><span class="value">512MB+</span></td>
+            </tr>
+            <tr>
+              <td>Cold start time</td>
+              <td class="highlight"><span class="value">~100ms</span></td>
+              <td><span class="value">30s+</span></td>
+              <td>N/A</td>
+              <td><span class="value">15s+</span></td>
+              <td><span class="value">10s+</span></td>
+            </tr>
+            <tr>
+              <td>Modern UI</td>
+              <td class="highlight"><span class="check">✓</span></td>
+              <td><span class="partial">~</span></td>
+              <td><span class="check">✓</span></td>
+              <td><span class="partial">~</span></td>
+              <td><span class="partial">~</span></td>
+            </tr>
+            <tr>
+              <td>Kanban boards</td>
+              <td class="highlight"><span class="check">✓</span></td>
+              <td><span class="check">✓</span></td>
+              <td><span class="check">✓</span></td>
+              <td><span class="check">✓</span></td>
+              <td><span class="check">✓</span></td>
+            </tr>
+            <tr>
+              <td>Cycles/Sprints</td>
+              <td class="highlight"><span class="check">✓</span></td>
+              <td><span class="check">✓</span></td>
+              <td><span class="check">✓</span></td>
+              <td><span class="check">✓</span></td>
+              <td><span class="check">✓</span></td>
+            </tr>
+            <tr>
+              <td>Built-in pages/docs</td>
+              <td class="highlight"><span class="check">✓</span></td>
+              <td><span class="cross">✗</span> Confluence</td>
+              <td><span class="cross">✗</span></td>
+              <td><span class="check">✓</span></td>
+              <td><span class="check">✓</span></td>
+            </tr>
+            <tr>
+              <td>Open source</td>
+              <td class="highlight"><span class="check">✓</span></td>
+              <td><span class="cross">✗</span></td>
+              <td><span class="cross">✗</span></td>
+              <td><span class="check">✓</span></td>
+              <td><span class="check">✓</span></td>
+            </tr>
+            <tr>
+              <td>Free tier</td>
+              <td class="highlight"><span class="check">✓</span> Unlimited</td>
+              <td><span class="check">✓</span> 10 users</td>
+              <td><span class="check">✓</span> Limited</td>
+              <td><span class="check">✓</span></td>
+              <td><span class="check">✓</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="comparison-cards">
+        <div class="comparison-card">
+          <div class="comparison-card-header negative">
+            <h4>The Old Way</h4>
+          </div>
+          <ul class="comparison-list">
+            <li><span class="cross">✗</span> Multiple services to maintain</li>
+            <li><span class="cross">✗</span> Complex Docker Compose files</li>
+            <li><span class="cross">✗</span> Database backups & migrations</li>
+            <li><span class="cross">✗</span> Redis cluster management</li>
+            <li><span class="cross">✗</span> GB of RAM just to idle</li>
+            <li><span class="cross">✗</span> Minutes to cold start</li>
+          </ul>
+        </div>
+        <div class="comparison-card">
+          <div class="comparison-card-header positive">
+            <h4>The Plane Lite Way</h4>
+          </div>
+          <ul class="comparison-list">
+            <li><span class="check">✓</span> Single container to deploy</li>
+            <li><span class="check">✓</span> One-line Docker command</li>
+            <li><span class="check">✓</span> Automatic SQLite backups</li>
+            <li><span class="check">✓</span> No cache service needed</li>
+            <li><span class="check">✓</span> 64MB memory footprint</li>
+            <li><span class="check">✓</span> Sub-second startup</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Architecture Section -->
+  <section class="architecture">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-badge">Architecture</span>
+        <h2 class="section-title">Simplicity is the<br><span class="text-gradient">ultimate sophistication</span></h2>
+      </div>
+
+      <div class="arch-comparison">
+        <div class="arch-diagram old">
+          <h4>Traditional Setup</h4>
+          <div class="arch-boxes">
+            <div class="arch-box">Load Balancer</div>
+            <div class="arch-arrow">↓</div>
+            <div class="arch-box">App Server (Node.js)</div>
+            <div class="arch-row">
+              <div class="arch-arrow">↓</div>
+              <div class="arch-arrow">↓</div>
+              <div class="arch-arrow">↓</div>
+            </div>
+            <div class="arch-row">
+              <div class="arch-box small">PostgreSQL</div>
+              <div class="arch-box small">Redis</div>
+              <div class="arch-box small">S3/Minio</div>
+            </div>
+          </div>
+          <p class="arch-note">5+ containers, complex networking, manual scaling</p>
+        </div>
+
+        <div class="arch-vs">VS</div>
+
+        <div class="arch-diagram new">
+          <h4>Plane Lite Setup</h4>
+          <div class="arch-boxes">
+            <div class="arch-box primary">
+              Plane Lite
+              <span class="arch-subtext">Bun + SQLite + Static Files</span>
+            </div>
+          </div>
+          <p class="arch-note">1 container, instant deployment, auto-scaling ready</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Deployment Options Section -->
+  <section class="deploy-options" id="deploy-options">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-badge">Infrastructure</span>
+        <h2 class="section-title">Choose your<br><span class="text-gradient">deployment strategy</span></h2>
+        <p class="section-subtitle">Flexible deployment options to match your infrastructure needs. All options support persistent storage for your database and media assets.</p>
+      </div>
+
+      <div class="storage-notice">
+        <div class="storage-notice-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            <path d="M12 8v4M12 16h.01"/>
+          </svg>
+        </div>
+        <div class="storage-notice-content">
+          <h4>External Storage Recommended</h4>
+          <p>For production deployments, we strongly recommend mounting an external persistent disk for your <code>/app/data</code> directory. This ensures your SQLite database and media uploads are safely stored on durable, backup-enabled storage separate from your compute instance.</p>
+        </div>
+      </div>
+
+      <div class="deploy-options-grid">
+        <!-- VPS Option -->
+        <div class="deploy-option-card">
+          <div class="deploy-option-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <rect x="2" y="3" width="20" height="14" rx="2"/>
+              <path d="M8 21h8M12 17v4"/>
+              <circle cx="12" cy="10" r="3"/>
+            </svg>
+          </div>
+          <div class="deploy-option-header">
+            <h3>Single VPS</h3>
+            <span class="deploy-option-badge recommended">Recommended</span>
+          </div>
+          <p class="deploy-option-desc">Deploy on a traditional virtual private server with attached block storage. Ideal for most teams.</p>
+          <ul class="deploy-option-features">
+            <li>
+              <span class="check">✓</span>
+              <span>Attach persistent block storage (DigitalOcean Volumes, AWS EBS, Hetzner Volumes)</span>
+            </li>
+            <li>
+              <span class="check">✓</span>
+              <span>Simple backup via disk snapshots</span>
+            </li>
+            <li>
+              <span class="check">✓</span>
+              <span>Full control over resources</span>
+            </li>
+            <li>
+              <span class="check">✓</span>
+              <span>Predictable monthly pricing</span>
+            </li>
+          </ul>
+          <div class="deploy-option-providers">
+            <span class="provider-label">Popular providers:</span>
+            <div class="provider-tags">
+              <span class="provider-tag">DigitalOcean</span>
+              <span class="provider-tag">Hetzner</span>
+              <span class="provider-tag">Linode</span>
+              <span class="provider-tag">Vultr</span>
+            </div>
+          </div>
+          <div class="deploy-option-code">
+            <code># Mount external volume to /app/data<br>docker run -d -v /mnt/volume/plane:/app/data plane/lite</code>
+          </div>
+        </div>
+
+        <!-- Serverless/PaaS Option -->
+        <div class="deploy-option-card">
+          <div class="deploy-option-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M17.5 19H9a7 7 0 116.71-9h1.79a4.5 4.5 0 110 9z"/>
+            </svg>
+          </div>
+          <div class="deploy-option-header">
+            <h3>PaaS / Serverless</h3>
+            <span class="deploy-option-badge easy">Easy Setup</span>
+          </div>
+          <p class="deploy-option-desc">Deploy to managed platforms with built-in persistent disk support. Zero infrastructure management.</p>
+          <ul class="deploy-option-features">
+            <li>
+              <span class="check">✓</span>
+              <span>One-click deployments with persistent volumes</span>
+            </li>
+            <li>
+              <span class="check">✓</span>
+              <span>Auto-scaling and health checks</span>
+            </li>
+            <li>
+              <span class="check">✓</span>
+              <span>SSL certificates included</span>
+            </li>
+            <li>
+              <span class="check">✓</span>
+              <span>Managed backups available</span>
+            </li>
+          </ul>
+          <div class="deploy-option-providers">
+            <span class="provider-label">Supported platforms:</span>
+            <div class="provider-tags">
+              <span class="provider-tag">Railway</span>
+              <span class="provider-tag">Render</span>
+              <span class="provider-tag">Fly.io</span>
+              <span class="provider-tag">Northflank</span>
+            </div>
+          </div>
+          <div class="deploy-option-code">
+            <code># Railway with persistent volume<br>railway volume create plane-data --mount /app/data</code>
+          </div>
+        </div>
+
+        <!-- Kubernetes Option -->
+        <div class="deploy-option-card">
+          <div class="deploy-option-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <circle cx="12" cy="12" r="10"/>
+              <path d="M12 6v6l4 2"/>
+              <circle cx="12" cy="12" r="3"/>
+            </svg>
+          </div>
+          <div class="deploy-option-header">
+            <h3>Kubernetes</h3>
+            <span class="deploy-option-badge advanced">Advanced</span>
+          </div>
+          <p class="deploy-option-desc">Deploy on Kubernetes with PersistentVolumeClaims for enterprise-grade reliability and scaling.</p>
+          <ul class="deploy-option-features">
+            <li>
+              <span class="check">✓</span>
+              <span>PersistentVolumeClaim for durable storage</span>
+            </li>
+            <li>
+              <span class="check">✓</span>
+              <span>Helm chart available</span>
+            </li>
+            <li>
+              <span class="check">✓</span>
+              <span>Rolling updates with zero downtime</span>
+            </li>
+            <li>
+              <span class="check">✓</span>
+              <span>Works with any storage class</span>
+            </li>
+          </ul>
+          <div class="deploy-option-providers">
+            <span class="provider-label">Compatible with:</span>
+            <div class="provider-tags">
+              <span class="provider-tag">EKS</span>
+              <span class="provider-tag">GKE</span>
+              <span class="provider-tag">AKS</span>
+              <span class="provider-tag">k3s</span>
+            </div>
+          </div>
+          <div class="deploy-option-code">
+            <code># Using PVC for persistent storage<br>kubectl apply -f plane-lite-pvc.yaml</code>
+          </div>
+        </div>
+
+        <!-- Edge/Homelab Option -->
+        <div class="deploy-option-card">
+          <div class="deploy-option-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/>
+              <path d="M9 22V12h6v10"/>
+            </svg>
+          </div>
+          <div class="deploy-option-header">
+            <h3>Homelab / Edge</h3>
+            <span class="deploy-option-badge">Self-Hosted</span>
+          </div>
+          <p class="deploy-option-desc">Run on your own hardware with NAS or local storage. Perfect for air-gapped or on-premise deployments.</p>
+          <ul class="deploy-option-features">
+            <li>
+              <span class="check">✓</span>
+              <span>Mount NAS/SAN volumes for backups</span>
+            </li>
+            <li>
+              <span class="check">✓</span>
+              <span>Works on Raspberry Pi (arm64)</span>
+            </li>
+            <li>
+              <span class="check">✓</span>
+              <span>Air-gapped deployment supported</span>
+            </li>
+            <li>
+              <span class="check">✓</span>
+              <span>No cloud dependencies</span>
+            </li>
+          </ul>
+          <div class="deploy-option-providers">
+            <span class="provider-label">Popular setups:</span>
+            <div class="provider-tags">
+              <span class="provider-tag">Proxmox</span>
+              <span class="provider-tag">TrueNAS</span>
+              <span class="provider-tag">Synology</span>
+              <span class="provider-tag">Unraid</span>
+            </div>
+          </div>
+          <div class="deploy-option-code">
+            <code># Mount NAS share for backups<br>docker run -d -v /mnt/nas/plane:/app/data plane/lite</code>
+          </div>
+        </div>
+      </div>
+
+      <!-- Backup Strategy -->
+      <div class="backup-strategy">
+        <div class="backup-strategy-header">
+          <div class="backup-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+          </div>
+          <div>
+            <h3>Backup Your Data</h3>
+            <p>Plane Lite stores all data in the <code>/app/data</code> directory. Back up this directory regularly to protect your projects.</p>
+          </div>
+        </div>
+        <div class="backup-items">
+          <div class="backup-item">
+            <div class="backup-item-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+              </svg>
+            </div>
+            <div>
+              <strong>plane.db</strong>
+              <span>SQLite database with all your issues, projects, and settings</span>
+            </div>
+          </div>
+          <div class="backup-item">
+            <div class="backup-item-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="18" height="18" rx="2"/>
+                <circle cx="8.5" cy="8.5" r="1.5"/>
+                <path d="M21 15l-5-5L5 21"/>
+              </svg>
+            </div>
+            <div>
+              <strong>uploads/</strong>
+              <span>User-uploaded images, attachments, and media files</span>
+            </div>
+          </div>
+          <div class="backup-item">
+            <div class="backup-item-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/>
+              </svg>
+            </div>
+            <div>
+              <strong>config.json</strong>
+              <span>Application configuration and workspace settings</span>
+            </div>
+          </div>
+        </div>
+        <div class="backup-code">
+          <div class="code-header">
+            <span>Simple Backup Script</span>
+          </div>
+          <pre><code><span class="comment"># Daily backup with timestamp</span>
+tar -czf "plane-backup-$(date +%Y%m%d).tar.gz" /app/data/
+
+<span class="comment"># Sync to S3-compatible storage</span>
+aws s3 sync /app/data/ s3://your-bucket/plane-backups/ --delete
+
+<span class="comment"># Or use restic for incremental backups</span>
+restic -r s3:s3.amazonaws.com/your-bucket backup /app/data/</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Deployment Section -->
+  <section class="deployment" id="deployment">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-badge">Deploy</span>
+        <h2 class="section-title">From zero to productive<br><span class="text-gradient">in 60 seconds</span></h2>
+        <p class="section-subtitle">Choose your preferred deployment method. All options are production-ready.</p>
+      </div>
+
+      <div class="deploy-tabs">
+        <button class="deploy-tab active" data-tab="docker">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M13.983 11.078h2.119a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.119a.185.185 0 00-.185.185v1.888c0 .102.083.185.185.185m-2.954-5.43h2.118a.186.186 0 00.186-.186V3.574a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.186m0 2.716h2.118a.187.187 0 00.186-.186V6.29a.186.186 0 00-.186-.185h-2.118a.185.185 0 00-.185.185v1.887c0 .102.082.185.185.186m-2.93 0h2.12a.186.186 0 00.184-.186V6.29a.185.185 0 00-.185-.185H8.1a.185.185 0 00-.185.185v1.887c0 .102.083.185.185.186m-2.964 0h2.119a.186.186 0 00.185-.186V6.29a.185.185 0 00-.185-.185H5.136a.186.186 0 00-.186.185v1.887c0 .102.084.185.186.186m5.893 2.715h2.118a.186.186 0 00.186-.185V9.006a.186.186 0 00-.186-.186h-2.118a.185.185 0 00-.185.185v1.888c0 .102.082.185.185.185m-2.93 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.185v1.888c0 .102.083.185.185.185m-2.964 0h2.119a.185.185 0 00.185-.185V9.006a.185.185 0 00-.185-.186h-2.119a.186.186 0 00-.186.186v1.887c0 .102.084.185.186.185m-2.92 0h2.12a.185.185 0 00.184-.185V9.006a.185.185 0 00-.184-.186h-2.12a.185.185 0 00-.184.185v1.888c0 .102.082.185.185.185M23.763 9.89c-.065-.051-.672-.51-1.954-.51-.338.001-.676.03-1.01.087-.248-1.7-1.653-2.53-1.716-2.566l-.344-.199-.226.327c-.284.438-.49.922-.612 1.43-.23.97-.09 1.882.403 2.661-.595.332-1.55.413-1.744.42H.751a.751.751 0 00-.75.748 11.376 11.376 0 00.692 4.062c.545 1.428 1.355 2.48 2.41 3.124 1.18.723 3.1 1.137 5.275 1.137.983.003 1.963-.086 2.93-.266a12.248 12.248 0 003.823-1.389c.98-.567 1.86-1.288 2.61-2.136 1.252-1.418 1.998-2.997 2.553-4.4h.221c1.372 0 2.215-.549 2.68-1.009.309-.293.55-.65.707-1.046l.098-.288Z"/>
+          </svg>
+          Docker
+        </button>
+        <button class="deploy-tab" data-tab="railway">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M.113 10.27A2.498 2.498 0 000 11.06v1.883c0 .474.134.93.378 1.317l4.86 7.716a.497.497 0 00.845-.046l2.19-4.079-7.16-7.58zm7.209 9.49l-2.088 3.887a.5.5 0 00.534.737l10.627-2.537a.5.5 0 00.286-.788l-1.77-2.285-7.59.986zM23.887 13.73a2.498 2.498 0 00.113-.79v-1.883a2.5 2.5 0 00-.378-1.317l-4.86-7.716a.497.497 0 00-.845.046l-2.19 4.08 7.16 7.58zm-7.209-9.49l2.088-3.887a.5.5 0 00-.534-.737L7.605 2.153a.5.5 0 00-.286.788l1.77 2.285 7.59-.986zM.386 12.56l7.24 7.669 8.218-1.069-7.24-7.668-8.218 1.068zm15.228-1.12l7.24 7.669.532-1.003a2.5 2.5 0 00.378-1.317v-1.883a2.5 2.5 0 00-.378-1.317l-.532-1.003-7.24 7.669 7.24-7.669-7.24-1.146zm-7.458 1.12l-7.24-7.669-.532 1.003A2.5 2.5 0 000 7.211v1.883c0 .474.134.93.378 1.317l.532 1.003 7.246-7.674-7.24 7.669 7.24 1.151zm7.458-1.12L8.374 4.772.386 5.84l7.24 7.669 7.988-1.069z"/>
+          </svg>
+          Railway
+        </button>
+        <button class="deploy-tab" data-tab="fly">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.894 17.703l-1.464-1.465a.75.75 0 00-1.06 0l-1.465 1.465a.75.75 0 000 1.06l1.464 1.465a.75.75 0 001.06 0l1.465-1.464a.75.75 0 000-1.061zm-9.788-9.788l1.464 1.465a.75.75 0 001.06 0l1.465-1.464a.75.75 0 000-1.061l-1.464-1.465a.75.75 0 00-1.06 0l-1.465 1.464a.75.75 0 000 1.061zm3.482 8.497a.75.75 0 00-1.06 0l-4.24 4.24a.75.75 0 000 1.06l.708.708a.75.75 0 001.06 0l4.24-4.24a.75.75 0 000-1.06l-.708-.708zm6.117-6.117a.75.75 0 00-1.06 0l-4.24 4.24a.75.75 0 000 1.06l.708.708a.75.75 0 001.06 0l4.24-4.24a.75.75 0 000-1.06l-.708-.708z"/>
+          </svg>
+          Fly.io
+        </button>
+        <button class="deploy-tab" data-tab="render">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 0A12 12 0 000 12a12 12 0 0012 12 12 12 0 0012-12A12 12 0 0012 0zm0 3.6a8.4 8.4 0 018.4 8.4 8.4 8.4 0 01-8.4 8.4A8.4 8.4 0 013.6 12 8.4 8.4 0 0112 3.6z"/>
+          </svg>
+          Render
+        </button>
+        <button class="deploy-tab" data-tab="binary">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="4" y="4" width="16" height="16" rx="2"/>
+            <path d="M9 9h6M9 13h6M9 17h4"/>
+          </svg>
+          Binary
+        </button>
+      </div>
+
+      <div class="deploy-content">
+        <div class="deploy-panel active" id="panel-docker">
+          <div class="code-block">
+            <div class="code-header">
+              <span>Docker</span>
+              <button class="copy-btn" data-copy="docker">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="9" y="9" width="13" height="13" rx="2"/>
+                  <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+                </svg>
+                Copy
+              </button>
+            </div>
+            <pre><code><span class="comment"># Quick start with Docker</span>
+docker run -d \
+  --name plane-lite \
+  -p 3000:3000 \
+  -v plane-data:/app/data \
+  plane/lite:latest
+
+<span class="comment"># With environment variables</span>
+docker run -d \
+  --name plane-lite \
+  -p 3000:3000 \
+  -v plane-data:/app/data \
+  -e SECRET_KEY=your-secret-key \
+  -e ADMIN_EMAIL=admin@company.com \
+  plane/lite:latest</code></pre>
+          </div>
+        </div>
+
+        <div class="deploy-panel" id="panel-railway">
+          <div class="code-block">
+            <div class="code-header">
+              <span>Railway</span>
+              <button class="copy-btn" data-copy="railway">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="9" y="9" width="13" height="13" rx="2"/>
+                  <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+                </svg>
+                Copy
+              </button>
+            </div>
+            <pre><code><span class="comment"># Deploy to Railway with one click</span>
+<span class="comment"># Or use the CLI:</span>
+
+railway login
+railway init
+railway up
+
+<span class="comment"># Configure persistent storage</span>
+railway volume create plane-data
+railway link</code></pre>
+          </div>
+          <a href="#" class="deploy-button">
+            <img src="https://railway.app/button.svg" alt="Deploy on Railway" height="44">
+          </a>
+        </div>
+
+        <div class="deploy-panel" id="panel-fly">
+          <div class="code-block">
+            <div class="code-header">
+              <span>Fly.io</span>
+              <button class="copy-btn" data-copy="fly">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="9" y="9" width="13" height="13" rx="2"/>
+                  <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+                </svg>
+                Copy
+              </button>
+            </div>
+            <pre><code><span class="comment"># Install Fly CLI and deploy</span>
+curl -L https://fly.io/install.sh | sh
+fly auth login
+
+<span class="comment"># Launch the app</span>
+fly launch --image plane/lite:latest
+
+<span class="comment"># Create persistent volume</span>
+fly volumes create plane_data --size 1
+fly deploy</code></pre>
+          </div>
+        </div>
+
+        <div class="deploy-panel" id="panel-render">
+          <div class="code-block">
+            <div class="code-header">
+              <span>Render</span>
+              <button class="copy-btn" data-copy="render">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="9" y="9" width="13" height="13" rx="2"/>
+                  <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+                </svg>
+                Copy
+              </button>
+            </div>
+            <pre><code><span class="comment"># render.yaml</span>
+services:
+  - type: web
+    name: plane-lite
+    env: docker
+    dockerfilePath: ./Dockerfile
+    disk:
+      name: plane-data
+      mountPath: /app/data
+      sizeGB: 1
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true</code></pre>
+          </div>
+          <a href="#" class="deploy-button">
+            <img src="https://render.com/images/deploy-to-render-button.svg" alt="Deploy to Render" height="44">
+          </a>
+        </div>
+
+        <div class="deploy-panel" id="panel-binary">
+          <div class="code-block">
+            <div class="code-header">
+              <span>Standalone Binary</span>
+              <button class="copy-btn" data-copy="binary">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="9" y="9" width="13" height="13" rx="2"/>
+                  <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+                </svg>
+                Copy
+              </button>
+            </div>
+            <pre><code><span class="comment"># Download the binary for your platform</span>
+<span class="comment"># Linux</span>
+curl -L https://github.com/makeplane/plane/releases/latest/download/plane-lite-linux-amd64 -o plane-lite
+chmod +x plane-lite
+
+<span class="comment"># macOS</span>
+curl -L https://github.com/makeplane/plane/releases/latest/download/plane-lite-darwin-arm64 -o plane-lite
+chmod +x plane-lite
+
+<span class="comment"># Run</span>
+./plane-lite --port 3000</code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA Section -->
+  <section class="cta">
+    <div class="container">
+      <div class="cta-content">
+        <h2>Ready to simplify your<br>project management?</h2>
+        <p>Join thousands of teams who've ditched bloated enterprise software for something better.</p>
+        <div class="cta-actions">
+          <a href="#deployment" class="btn btn-primary btn-large">
+            Deploy in 60 Seconds
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M5 12h14M12 5l7 7-7 7"/>
+            </svg>
+          </a>
+          <a href="https://github.com/makeplane/plane" target="_blank" class="btn btn-ghost btn-large">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+            </svg>
+            View on GitHub
+          </a>
+        </div>
+      </div>
+      <div class="cta-decoration">
+        <div class="cta-circle"></div>
+        <div class="cta-circle"></div>
+        <div class="cta-circle"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-grid">
+        <div class="footer-brand">
+          <a href="#" class="nav-logo">
+            <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="32" height="32" rx="8" fill="url(#logo-gradient-footer)"/>
+              <path d="M8 12L16 8L24 12V20L16 24L8 20V12Z" stroke="white" stroke-width="2" stroke-linejoin="round"/>
+              <path d="M16 14V18M14 16H18" stroke="white" stroke-width="2" stroke-linecap="round"/>
+              <defs>
+                <linearGradient id="logo-gradient-footer" x1="0" y1="0" x2="32" y2="32">
+                  <stop stop-color="#3B82F6"/>
+                  <stop offset="1" stop-color="#8B5CF6"/>
+                </linearGradient>
+              </defs>
+            </svg>
+            <span>Plane Lite</span>
+          </a>
+          <p>Lightning fast project management for modern teams.</p>
+          <div class="footer-social">
+            <a href="https://github.com/makeplane/plane" target="_blank" aria-label="GitHub">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+              </svg>
+            </a>
+            <a href="https://twitter.com/planepowers" target="_blank" aria-label="Twitter">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+              </svg>
+            </a>
+            <a href="https://discord.gg/plane" target="_blank" aria-label="Discord">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M20.317 4.37a19.791 19.791 0 00-4.885-1.515.074.074 0 00-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 00-5.487 0 12.64 12.64 0 00-.617-1.25.077.077 0 00-.079-.037A19.736 19.736 0 003.677 4.37a.07.07 0 00-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 00.031.057 19.9 19.9 0 005.993 3.03.078.078 0 00.084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 00-.041-.106 13.107 13.107 0 01-1.872-.892.077.077 0 01-.008-.128 10.2 10.2 0 00.372-.292.074.074 0 01.077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 01.078.01c.12.098.246.198.373.292a.077.077 0 01-.006.127 12.299 12.299 0 01-1.873.892.077.077 0 00-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 00.084.028 19.839 19.839 0 006.002-3.03.077.077 0 00.032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 00-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/>
+              </svg>
+            </a>
+          </div>
+        </div>
+        <div class="footer-links">
+          <h4>Product</h4>
+          <a href="#features">Features</a>
+          <a href="#comparison">Compare</a>
+          <a href="#deploy-options">Infrastructure</a>
+          <a href="#deployment">Deploy</a>
+          <a href="#">Changelog</a>
+        </div>
+        <div class="footer-links">
+          <h4>Resources</h4>
+          <a href="#">Documentation</a>
+          <a href="#">API Reference</a>
+          <a href="#">Guides</a>
+          <a href="#">Blog</a>
+          <a href="#">Status</a>
+        </div>
+        <div class="footer-links">
+          <h4>Company</h4>
+          <a href="#">About</a>
+          <a href="#">Careers</a>
+          <a href="#">Contact</a>
+          <a href="#">Privacy</a>
+          <a href="#">Terms</a>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <p>&copy; 2024 Plane. Open source under AGPL-3.0.</p>
+        <p>Made with love for developers, by developers.</p>
+      </div>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>
