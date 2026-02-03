@@ -1,5 +1,5 @@
 {
-  "name": "plane-api",
+  "name": "@raysca/feather",
   "version": "0.1.0",
   "private": true,
   "type": "module",
