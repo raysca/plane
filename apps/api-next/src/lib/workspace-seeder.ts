@@ -1,6 +1,6 @@
 
 import { db } from "../db";
-import { users, userProfiles } from "../db/schema/user";
+import { users, userProfiles, accounts } from "../db/schema/user";
 import {
     workspaces,
     workspaceMembers,
@@ -43,6 +43,9 @@ import { createId } from "@paralleldrive/cuid2";
 import path from "path";
 import fs from "fs/promises";
 
+// Default password for seeded users (can be overridden in users.json)
+const DEFAULT_SEED_PASSWORD = "Password123!";
+
 // Types for seed data
 type SeedUser = {
     id: number;
@@ -54,6 +57,7 @@ type SeedUser = {
     role: string;
     workspace_role: number;
     project_role: number;
+    password?: string;  // Optional - uses DEFAULT_SEED_PASSWORD if not provided
 };
 
 type SeedProject = {
@@ -263,7 +267,23 @@ export async function seedWorkspace(workspaceId: string, userId: string) {
                         role: seed.role,
                     });
 
-                    console.log(`[Seeder] Created user ${seed.display_name} (${seed.email})`);
+                    // Create account with password for credential login
+                    // Uses same Argon2id parameters as Better Auth (see src/lib/auth.ts)
+                    const password = seed.password || DEFAULT_SEED_PASSWORD;
+                    const hashedPassword = await Bun.password.hash(password, {
+                        algorithm: "argon2id",
+                        memoryCost: 65536,
+                        timeCost: 2,
+                    });
+
+                    await db.insert(accounts).values({
+                        userId: seedUserId,
+                        providerId: "credential",
+                        accountId: seed.email,
+                        password: hashedPassword,
+                    });
+
+                    console.log(`[Seeder] Created user ${seed.display_name} (${seed.email}) with password`);
                 }
 
                 userMap[seed.id] = seedUserId;

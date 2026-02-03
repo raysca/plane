@@ -96,7 +96,12 @@ export class InstanceService {
             throw new Error("Admin already exists");
         }
 
-        const hashedPassword = await Bun.password.hash(data.password);
+        // Uses same Argon2id parameters as Better Auth (see src/lib/auth.ts)
+        const hashedPassword = await Bun.password.hash(data.password, {
+            algorithm: "argon2id",
+            memoryCost: 65536,
+            timeCost: 2,
+        });
 
         const newUser = await db.insert(users).values({
             email: data.email,
