@@ -35,6 +35,8 @@ import { cycles, cycleIssues, cycleFavorites } from "../../db/schema/cycle";
 import { modules, moduleIssues, moduleMembers, moduleFavorites, moduleLinks } from "../../db/schema/module";
 import { views, viewFavorites } from "../../db/schema/view";
 import { intakeIssues } from "../../db/schema/intake";
+import { webhooks } from "../../db/schema/webhook";
+import { createId } from "@paralleldrive/cuid2";
 import { sql, not, like, isNull, count, count as countFn, lt, gt, gte, lte, max, or, isNotNull } from "drizzle-orm";
 import homePreferenceRoutes from "./home-preference";
 import userPropertiesRoutes from "./user-properties";
@@ -3806,25 +3808,243 @@ workspaceRoutes.delete("/:slug/workspace-integrations/:id/", async (c) => {
 });
 
 // Webhooks
-workspaceRoutes.get("/:slug/webhooks/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
+
+// Webhook validation schemas
+const createWebhookSchema = z.object({
+  url: z.string().url(),
+  is_active: z.boolean().optional().default(true),
+  project_event: z.boolean().optional().default(true),
+  issue_event: z.boolean().optional().default(true),
+  module_event: z.boolean().optional().default(false),
+  cycle_event: z.boolean().optional().default(false),
+  issue_comment_event: z.boolean().optional().default(false),
 });
 
-workspaceRoutes.post("/:slug/webhooks/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
+const updateWebhookSchema = z.object({
+  url: z.string().url().optional(),
+  is_active: z.boolean().optional(),
+  project_event: z.boolean().optional(),
+  issue_event: z.boolean().optional(),
+  module_event: z.boolean().optional(),
+  cycle_event: z.boolean().optional(),
+  issue_comment_event: z.boolean().optional(),
 });
 
-workspaceRoutes.get("/:slug/webhooks/:webhookId/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
-});
+// Helper to format webhook for API response
+function formatWebhookResponse(webhook: typeof webhooks.$inferSelect) {
+  return {
+    id: webhook.id,
+    url: webhook.url,
+    is_active: webhook.isActive,
+    secret_key: webhook.secretKey,
+    project_event: webhook.projectEvent,
+    issue_event: webhook.issueEvent,
+    module_event: webhook.moduleEvent,
+    cycle_event: webhook.cycleEvent,
+    issue_comment_event: webhook.issueCommentEvent,
+    workspace_id: webhook.workspaceId,
+    created_by_id: webhook.createdById,
+    created_at: webhook.createdAt?.toISOString(),
+    updated_at: webhook.updatedAt?.toISOString(),
+  };
+}
 
-workspaceRoutes.patch("/:slug/webhooks/:webhookId/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
-});
+// Helper to generate a secure secret key
+function generateSecretKey(): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let result = '';
+  for (let i = 0; i < 32; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
 
-workspaceRoutes.delete("/:slug/webhooks/:webhookId/", async (c) => {
-  return c.json({ detail: "Not implemented" }, 501);
-});
+// GET /api/workspaces/:slug/webhooks/ - List all webhooks
+workspaceRoutes.get(
+  "/:slug/webhooks/",
+  workspaceMiddleware,
+  requireWorkspaceAdmin,
+  async (c) => {
+    const workspace = c.get("workspace");
+    if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+    const webhookList = await db
+      .select()
+      .from(webhooks)
+      .where(eq(webhooks.workspaceId, workspace.id))
+      .orderBy(desc(webhooks.createdAt));
+
+    return c.json(webhookList.map(formatWebhookResponse));
+  }
+);
+
+// POST /api/workspaces/:slug/webhooks/ - Create a webhook
+workspaceRoutes.post(
+  "/:slug/webhooks/",
+  workspaceMiddleware,
+  requireWorkspaceAdmin,
+  zValidator("json", createWebhookSchema),
+  async (c) => {
+    const user = c.get("user");
+    const workspace = c.get("workspace");
+    if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+    const body = c.req.valid("json");
+
+    // Check for duplicate URL in the same workspace
+    const existing = await db.query.webhooks.findFirst({
+      where: and(
+        eq(webhooks.url, body.url),
+        eq(webhooks.workspaceId, workspace.id)
+      ),
+    });
+
+    if (existing) {
+      return c.json({ url: ["A webhook with this URL already exists."] }, 400);
+    }
+
+    const secretKey = generateSecretKey();
+
+    const result = await db
+      .insert(webhooks)
+      .values({
+        id: createId(),
+        workspaceId: workspace.id,
+        url: body.url,
+        secretKey,
+        isActive: body.is_active ?? true,
+        projectEvent: body.project_event ?? true,
+        issueEvent: body.issue_event ?? true,
+        moduleEvent: body.module_event ?? false,
+        cycleEvent: body.cycle_event ?? false,
+        issueCommentEvent: body.issue_comment_event ?? false,
+        createdById: user.id,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .returning();
+
+    return c.json(formatWebhookResponse(result[0]!), 201);
+  }
+);
+
+// GET /api/workspaces/:slug/webhooks/:webhookId/ - Get a single webhook
+workspaceRoutes.get(
+  "/:slug/webhooks/:webhookId/",
+  workspaceMiddleware,
+  requireWorkspaceAdmin,
+  async (c) => {
+    const workspace = c.get("workspace");
+    if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+    const webhookId = c.req.param("webhookId");
+
+    const webhook = await db.query.webhooks.findFirst({
+      where: and(
+        eq(webhooks.id, webhookId),
+        eq(webhooks.workspaceId, workspace.id)
+      ),
+    });
+
+    if (!webhook) {
+      return c.json({ detail: "Webhook not found." }, 404);
+    }
+
+    return c.json(formatWebhookResponse(webhook));
+  }
+);
+
+// PATCH /api/workspaces/:slug/webhooks/:webhookId/ - Update a webhook
+workspaceRoutes.patch(
+  "/:slug/webhooks/:webhookId/",
+  workspaceMiddleware,
+  requireWorkspaceAdmin,
+  zValidator("json", updateWebhookSchema),
+  async (c) => {
+    const workspace = c.get("workspace");
+    if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+    const webhookId = c.req.param("webhookId");
+    const body = c.req.valid("json");
+
+    const existing = await db.query.webhooks.findFirst({
+      where: and(
+        eq(webhooks.id, webhookId),
+        eq(webhooks.workspaceId, workspace.id)
+      ),
+    });
+
+    if (!existing) {
+      return c.json({ detail: "Webhook not found." }, 404);
+    }
+
+    // Check for duplicate URL if updating
+    if (body.url && body.url !== existing.url) {
+      const duplicate = await db.query.webhooks.findFirst({
+        where: and(
+          eq(webhooks.url, body.url),
+          eq(webhooks.workspaceId, workspace.id),
+          not(eq(webhooks.id, webhookId))
+        ),
+      });
+
+      if (duplicate) {
+        return c.json({ url: ["A webhook with this URL already exists."] }, 400);
+      }
+    }
+
+    const updateData: Partial<typeof webhooks.$inferInsert> = {
+      updatedAt: new Date(),
+    };
+
+    if (body.url !== undefined) updateData.url = body.url;
+    if (body.is_active !== undefined) updateData.isActive = body.is_active;
+    if (body.project_event !== undefined) updateData.projectEvent = body.project_event;
+    if (body.issue_event !== undefined) updateData.issueEvent = body.issue_event;
+    if (body.module_event !== undefined) updateData.moduleEvent = body.module_event;
+    if (body.cycle_event !== undefined) updateData.cycleEvent = body.cycle_event;
+    if (body.issue_comment_event !== undefined) updateData.issueCommentEvent = body.issue_comment_event;
+
+    await db
+      .update(webhooks)
+      .set(updateData)
+      .where(eq(webhooks.id, webhookId));
+
+    const updated = await db.query.webhooks.findFirst({
+      where: eq(webhooks.id, webhookId),
+    });
+
+    return c.json(formatWebhookResponse(updated!));
+  }
+);
+
+// DELETE /api/workspaces/:slug/webhooks/:webhookId/ - Delete a webhook
+workspaceRoutes.delete(
+  "/:slug/webhooks/:webhookId/",
+  workspaceMiddleware,
+  requireWorkspaceAdmin,
+  async (c) => {
+    const workspace = c.get("workspace");
+    if (!workspace) return c.json({ detail: "Workspace not found." }, 404);
+
+    const webhookId = c.req.param("webhookId");
+
+    const webhook = await db.query.webhooks.findFirst({
+      where: and(
+        eq(webhooks.id, webhookId),
+        eq(webhooks.workspaceId, workspace.id)
+      ),
+    });
+
+    if (!webhook) {
+      return c.json({ detail: "Webhook not found." }, 404);
+    }
+
+    await db.delete(webhooks).where(eq(webhooks.id, webhookId));
+
+    return new Response(null, { status: 204 });
+  }
+);
 
 // Import/Export
 workspaceRoutes.get("/:slug/importers/", async (c) => {
