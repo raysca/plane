@@ -128,7 +128,7 @@ app.route("/api/workspaces/:slug/projects/:projectId/project-deploy-boards/", de
 app.route("/api/public/", publicAnchorRoutes);
 app.route("/api/workspaces/:slug/draft-issues/", draftRoutes);
 app.route("/api/workspaces/:slug/draft-to-issue/", draftToIssueRoutes);
-app.route("/api/workspace-slug-check/", workspaceSlugCheckRoutes);
+app.route("/api/workspace-slug-check", workspaceSlugCheckRoutes);
 app.route("/api/unsplash/", externalRoutes);
 app.route("/api/assets/v2/", assetRoutes);
 app.route("/api/timezones/", timezoneRoutes);
