@@ -17,6 +17,11 @@ interface AppUIState {
   commandPaletteOpen: boolean;
   openCommandPalette: () => void;
   closeCommandPalette: () => void;
+
+  // Mobile menu
+  mobileMenuOpen: boolean;
+  openMobileMenu: () => void;
+  closeMobileMenu: () => void;
 }
 
 export const useAppUIStore = create<AppUIState>()(
@@ -36,6 +41,11 @@ export const useAppUIStore = create<AppUIState>()(
       commandPaletteOpen: false,
       openCommandPalette: () => set({ commandPaletteOpen: true }),
       closeCommandPalette: () => set({ commandPaletteOpen: false }),
+
+      // Mobile menu
+      mobileMenuOpen: false,
+      openMobileMenu: () => set({ mobileMenuOpen: true }),
+      closeMobileMenu: () => set({ mobileMenuOpen: false }),
     }),
     {
       name: "plane-app-ui",

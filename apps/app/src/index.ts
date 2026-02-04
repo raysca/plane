@@ -391,6 +391,7 @@ const server = Bun.serve({
     '/accounts/*': () => serveWebIndex(),
     '/onboarding': () => serveWebIndex(),
     '/sign-up': () => serveWebIndex(),
+    '/create-workspace': () => serveWebIndex(),
     // API routes handled by Hono app
     '/*': (req: Request, server: Server<WebSocketData>) => {
       const url = new URL(req.url);
