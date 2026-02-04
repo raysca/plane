@@ -394,7 +394,19 @@ const server = Bun.serve({
       }
       return new Response("WebSocket upgrade failed", { status: 400 });
     },
-    '/*': (req: Request, server: Server<WebSocketData>) => app.fetch(req, server),
+    '/*': (req: Request, server: Server<WebSocketData>) => {
+      const url = new URL(req.url);
+      const pathname = url.pathname;
+
+      // API routes go to Hono
+      if (pathname.startsWith('/api/') || pathname.startsWith('/auth/')) {
+        return app.fetch(req, server);
+      }
+
+      // All other routes serve the web SPA (for TanStack Router to handle)
+      // This includes workspace routes like /:workspaceSlug/*
+      return fetch(new URL('/', req.url));
+    },
   },
   websocket: websocketHandler,
 });

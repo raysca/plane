@@ -112,8 +112,28 @@ function SignInPage() {
         throw new Error(errorData.message || "Invalid email or password");
       }
 
-      const nextPath = search.next_path || "/onboarding";
-      window.location.href = nextPath;
+      // If a next_path was provided, use it
+      if (search.next_path) {
+        window.location.href = search.next_path;
+        return;
+      }
+
+      // Check for existing workspaces
+      const workspacesRes = await fetch("/api/workspaces/", {
+        credentials: "include",
+      });
+
+      if (workspacesRes.ok) {
+        const workspaces = await workspacesRes.json();
+        if (workspaces && workspaces.length > 0) {
+          // Redirect to the first workspace
+          window.location.href = `/${workspaces[0].slug}`;
+          return;
+        }
+      }
+
+      // No workspaces, go to onboarding
+      window.location.href = "/onboarding";
     } catch (err) {
       setError(err instanceof Error ? err.message : "An error occurred");
     } finally {
