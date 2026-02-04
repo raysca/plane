@@ -368,7 +368,15 @@ const server = Bun.serve({
       }
       return new Response("WebSocket upgrade failed", { status: 400 });
     },
-    '/*': (req: Request, server: Server<WebSocketData>) => app.fetch(req, server),
+    '/*': (req: Request, server: Server<WebSocketData>) => {
+      // Normalize API paths to have trailing slashes
+      const url = new URL(req.url);
+      if (url.pathname.startsWith('/api/') && !url.pathname.endsWith('/')) {
+        url.pathname += '/';
+        req = new Request(url.toString(), req);
+      }
+      return app.fetch(req, server);
+    },
   },
   websocket: websocketHandler,
 });

@@ -84,6 +84,7 @@ app.use("*", logger());
 app.use("*", prettyJSON());
 app.use("*", secureHeaders());
 
+
 // CORS configuration
 app.use(
   "*",
