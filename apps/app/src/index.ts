@@ -6,6 +6,7 @@ import { workspaceMembers } from "./db/schema/workspace";
 import { projectMembers } from "./db/schema/project";
 import { eq, and } from "drizzle-orm";
 import admin from './admin/index.html'
+import web from './web/index.html'
 import { instanceAdmins } from "./db/schema/instance";
 
 // WebSocket data interface
@@ -281,9 +282,34 @@ function extractSessionToken(req: Request): string | null {
 // Start server
 const port = parseInt(process.env.PORT || "8000");
 
+// List of web app routes (SPA routes)
+const webAppRoutes = [
+  '/',
+  '/sign-up',
+  '/onboarding',
+  '/create-workspace',
+  '/invitations',
+  '/workspace-invitations',
+  '/accounts/forgot-password',
+  '/accounts/reset-password',
+  '/accounts/set-password',
+];
+
 const server = Bun.serve({
   port,
   routes: {
+    // Web app routes - serve the SPA HTML
+    '/': web,
+    '/sign-up': web,
+    '/onboarding': web,
+    '/create-workspace': web,
+    '/invitations': web,
+    '/workspace-invitations': web,
+    '/accounts/forgot-password': web,
+    '/accounts/reset-password': web,
+    '/accounts/set-password': web,
+
+    // Admin routes
     '/admin': admin,
     '/admin/*': async (req: Request) => {
       const url = new URL(req.url);

@@ -1,0 +1,74 @@
+@import "tailwindcss";
+
+/* Source paths for content scanning */
+@source "../../**/*.tsx";
+@source "../../**/*.ts";
+
+/* Plane-compatible CSS variables */
+:root {
+  /* Background colors */
+  --color-background-100: 255 255 255;
+  --color-background-80: 250 250 250;
+  --color-background-90: 245 245 245;
+
+  /* Text colors */
+  --color-text-100: 23 23 23;
+  --color-text-200: 64 64 64;
+  --color-text-300: 115 115 115;
+  --color-text-400: 163 163 163;
+
+  /* Border colors */
+  --color-border-100: 229 229 229;
+  --color-border-200: 212 212 212;
+  --color-border-300: 163 163 163;
+
+  /* Primary colors */
+  --color-primary-100: 59 130 246;
+  --color-primary-200: 37 99 235;
+  --color-primary-300: 29 78 216;
+
+  /* Accent colors */
+  --color-accent-100: 59 130 246;
+}
+
+.dark {
+  --color-background-100: 23 23 23;
+  --color-background-80: 38 38 38;
+  --color-background-90: 30 30 30;
+
+  --color-text-100: 250 250 250;
+  --color-text-200: 212 212 212;
+  --color-text-300: 163 163 163;
+  --color-text-400: 115 115 115;
+
+  --color-border-100: 64 64 64;
+  --color-border-200: 82 82 82;
+  --color-border-300: 115 115 115;
+}
+
+/* Custom Plane theme utilities */
+@theme {
+  --color-custom-background-100: rgb(var(--color-background-100));
+  --color-custom-background-80: rgb(var(--color-background-80));
+  --color-custom-background-90: rgb(var(--color-background-90));
+
+  --color-custom-text-100: rgb(var(--color-text-100));
+  --color-custom-text-200: rgb(var(--color-text-200));
+  --color-custom-text-300: rgb(var(--color-text-300));
+  --color-custom-text-400: rgb(var(--color-text-400));
+
+  --color-custom-border-100: rgb(var(--color-border-100));
+  --color-custom-border-200: rgb(var(--color-border-200));
+  --color-custom-border-300: rgb(var(--color-border-300));
+
+  --color-custom-primary-100: rgb(var(--color-primary-100));
+  --color-custom-primary-200: rgb(var(--color-primary-200));
+  --color-custom-primary-300: rgb(var(--color-primary-300));
+}
+
+body {
+  background-color: rgb(var(--color-background-100));
+  color: rgb(var(--color-text-100));
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+}
