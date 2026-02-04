@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
 import { App } from "./app";
+// CSS is built separately with Tailwind CLI and loaded via HTML link tag
 
 const queryClient = new QueryClient({
   defaultOptions: {

@@ -1,23 +1,23 @@
-import { BrowserRouter, Routes, Route } from "react-router";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router";
+import { HomePage } from "./pages/home";
+import { ForgotPasswordPage } from "./pages/accounts/forgot-password";
+import { ResetPasswordPage } from "./pages/accounts/reset-password";
 
 export function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={<Home />} />
-        {/* Add routes as they are migrated */}
+        {/* Auth routes */}
+        <Route path="/" element={<HomePage />} />
+        <Route path="/accounts/sign-in" element={<HomePage />} />
+        <Route path="/accounts/sign-up" element={<HomePage />} />
+        <Route path="/accounts/forgot-password" element={<ForgotPasswordPage />} />
+        <Route path="/accounts/reset-password" element={<ResetPasswordPage />} />
+
+        {/* TODO: Add more routes as they are migrated */}
+        {/* <Route path="/onboarding" element={<OnboardingPage />} /> */}
+        {/* <Route path="/:workspaceSlug/*" element={<WorkspaceRoutes />} /> */}
       </Routes>
     </BrowserRouter>
-  );
-}
-
-function Home() {
-  return (
-    <div className="flex min-h-screen items-center justify-center">
-      <div className="text-center">
-        <h1 className="text-2xl font-bold">Plane (web-next)</h1>
-        <p className="mt-2 text-gray-600">Migration in progress...</p>
-      </div>
-    </div>
   );
 }

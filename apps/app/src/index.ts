@@ -8,6 +8,24 @@ import { eq, and } from "drizzle-orm";
 import admin from './admin/index.html'
 import { instanceAdmins } from "./db/schema/instance";
 
+// Helper to serve static files from web-next build
+const WEB_DIST_PATH = "./dist/web";
+async function serveWebFile(pathname: string): Promise<Response | null> {
+  const filePath = `${WEB_DIST_PATH}${pathname}`;
+  const file = Bun.file(filePath);
+  if (await file.exists()) {
+    return new Response(file);
+  }
+  return null;
+}
+
+async function serveWebIndex(): Promise<Response> {
+  const file = Bun.file(`${WEB_DIST_PATH}/index.html`);
+  return new Response(file, {
+    headers: { "Content-Type": "text/html" },
+  });
+}
+
 // WebSocket data interface
 interface WebSocketData {
   userId: string | null;
@@ -368,7 +386,32 @@ const server = Bun.serve({
       }
       return new Response("WebSocket upgrade failed", { status: 400 });
     },
-    '/*': (req: Request, server: Server<WebSocketData>) => app.fetch(req, server),
+    // Serve web-next frontend for non-API routes
+    '/': () => serveWebIndex(),
+    '/accounts/*': () => serveWebIndex(),
+    '/onboarding': () => serveWebIndex(),
+    '/sign-up': () => serveWebIndex(),
+    // API routes handled by Hono app
+    '/*': (req: Request, server: Server<WebSocketData>) => {
+      const url = new URL(req.url);
+      // Let Hono handle /api/* routes
+      if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/auth/')) {
+        return app.fetch(req, server);
+      }
+      // Serve static assets from dist/web
+      if (url.pathname.match(/\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot)$/)) {
+        const filePath = `./dist/web${url.pathname}`;
+        const file = Bun.file(filePath);
+        return file.exists().then(exists => {
+          if (exists) {
+            return new Response(file);
+          }
+          return app.fetch(req, server);
+        });
+      }
+      // SPA fallback for all other routes
+      return fetch(new URL('/', req.url));
+    },
   },
   websocket: websocketHandler,
 });
