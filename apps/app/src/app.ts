@@ -4,6 +4,8 @@ import { logger } from "hono/logger";
 import { prettyJSON } from "hono/pretty-json";
 import { secureHeaders } from "hono/secure-headers";
 import { timing } from "hono/timing";
+import { serveStatic } from "hono/bun";
+import path from "path";
 import { errorHandler } from "./middleware/error";
 import { auth } from "./lib/auth";
 import { authRoutes } from "./routes/auth";
@@ -21,6 +23,9 @@ import { intakeRoutes } from "./routes/intake";
 import { draftRoutes, draftToIssueRoutes } from "./routes/drafts";
 import { deployBoardRoutes } from "./routes/projects/deploy-boards";
 import { publicAnchorRoutes } from "./routes/public/anchor";
+
+// Path to the web app's static build
+const WEB_BUILD_PATH = path.resolve(import.meta.dir, "../../web/build/client");
 
 
 // Types for context variables
@@ -133,14 +138,62 @@ app.route("/api/unsplash/", externalRoutes);
 app.route("/api/assets/v2/", assetRoutes);
 app.route("/api/timezones/", timezoneRoutes);
 
-// 404 handler
-app.notFound((c) => {
-  return c.json(
-    {
-      detail: "Not found.",
+// ====== Static Files from Web App Build ======
+
+// Serve hashed assets with immutable caching
+app.use(
+  "/assets/*",
+  serveStatic({
+    root: WEB_BUILD_PATH,
+    onFound: async (_path, c) => {
+      c.header("Cache-Control", "public, max-age=31536000, immutable");
     },
-    404
-  );
+  })
+);
+
+// Serve static directories
+app.use("/favicon/*", serveStatic({ root: WEB_BUILD_PATH }));
+app.use("/icons/*", serveStatic({ root: WEB_BUILD_PATH }));
+app.use("/plane-logos/*", serveStatic({ root: WEB_BUILD_PATH }));
+
+// Root-level static files
+app.get("/manifest.json", () => new Response(Bun.file(path.join(WEB_BUILD_PATH, "manifest.json"))));
+app.get("/site.webmanifest.json", () =>
+  new Response(Bun.file(path.join(WEB_BUILD_PATH, "site.webmanifest.json")))
+);
+app.get("/sw.js", () =>
+  new Response(Bun.file(path.join(WEB_BUILD_PATH, "sw.js")), {
+    headers: { "Content-Type": "application/javascript" },
+  })
+);
+app.get("/sw.js.map", () => new Response(Bun.file(path.join(WEB_BUILD_PATH, "sw.js.map"))));
+app.get("/workbox-:hash.js", (c) =>
+  new Response(Bun.file(path.join(WEB_BUILD_PATH, `workbox-${c.req.param("hash")}.js`)))
+);
+app.get("/workbox-:hash.js.map", (c) =>
+  new Response(Bun.file(path.join(WEB_BUILD_PATH, `workbox-${c.req.param("hash")}.js.map`)))
+);
+
+// ====== SPA Fallback ======
+
+// 404 handler with SPA fallback
+app.notFound(async (c) => {
+  const pathname = new URL(c.req.url).pathname;
+
+  // API routes return JSON 404
+  if (pathname.startsWith("/api/") || pathname.startsWith("/auth/")) {
+    return c.json({ detail: "Not found." }, 404);
+  }
+
+  // All other routes serve the SPA index.html
+  const indexFile = Bun.file(path.join(WEB_BUILD_PATH, "index.html"));
+  if (await indexFile.exists()) {
+    return new Response(indexFile, {
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+  }
+
+  return c.json({ detail: "Not found." }, 404);
 });
 
 export { app };
