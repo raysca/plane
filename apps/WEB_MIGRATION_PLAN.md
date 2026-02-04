@@ -9,8 +9,59 @@
 - ✅ Remove MobX (use TanStack Query + Zustand)
 - ✅ Remove SWR (use TanStack Query)
 - ✅ Relative API calls (same origin)
-- ✅ CE components only (exclude `/ee/` folder)
+- ✅ Open source only (exclude `/ee/` folder from original `web/`)
 - ✅ Full feature parity with existing web app
+
+## ⚠️ Important: Preservation Policy
+
+**Old files in the `web` folder should be left intact and NOT deleted during migration.**
+
+This allows for:
+- **Parallel development**: Both old and new implementations can coexist
+- **Safe rollback**: Easy to revert if issues arise
+- **Incremental adoption**: Migrate one feature at a time without breaking others
+- **Reference code**: Original implementations remain available for comparison
+
+Migration should be **additive** — create new files in `apps/web-next/` rather than modifying or deleting files in `apps/web/`.
+
+---
+
+## Project Structure
+
+The migration uses a **separate source, unified serve** architecture:
+
+```
+apps/
+├── web/              # Original frontend (PRESERVED - do not modify)
+│   ├── app/          # React Router routes
+│   ├── core/         # Core components & services
+│   └── ...
+│
+├── web-next/         # NEW: Migrated frontend (TanStack Query + Zustand)
+│   ├── app/          # React Router routes (migrated)
+│   ├── core/         # All components, hooks, stores
+│   │   ├── components/    # All UI components
+│   │   ├── hooks/
+│   │   │   └── queries/   # TanStack Query hooks
+│   │   ├── store/         # Zustand stores (UI state only)
+│   │   └── lib/           # API client, utilities
+│   └── package.json
+│
+└── app/              # Bun server
+    ├── src/          # API routes (Hono), auth (Better Auth), DB (Drizzle)
+    └── dist/
+        └── web/      # Built frontend assets (served statically)
+```
+
+### Why This Structure?
+
+| Benefit | Description |
+|---------|-------------|
+| **Clear separation** | Frontend (`web-next/`) and backend (`app/`) are distinct packages |
+| **Preservation** | Original `web/` remains untouched for reference and rollback |
+| **Independent iteration** | Can develop frontend without touching server code |
+| **Single deployment** | Bun serves both API and static files from one process |
+| **Shared types** | Both packages can import from `@plane/types` |
 
 ---
 
@@ -19,7 +70,7 @@
 ### Before (Current Stack)
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                      Frontend                           │
+│                   apps/web (Frontend)                   │
 ├─────────────────────────────────────────────────────────┤
 │  Vite (bundler/dev server)                             │
 │  React Router v7                                        │
@@ -38,101 +89,133 @@
 ### After (New Stack)
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    Bun Server                           │
+│                 apps/app (Bun Server)                   │
 ├─────────────────────────────────────────────────────────┤
-│  Static file serving (built frontend)                  │
+│  Static file serving (from dist/web/)                  │
 │  API routes (Hono)                                      │
 │  Better Auth                                            │
 │  Drizzle ORM + SQLite                                  │
 └─────────────────────────────────────────────────────────┘
                            │
-                           ▼
-┌─────────────────────────────────────────────────────────┐
-│                      Frontend                           │
-├─────────────────────────────────────────────────────────┤
-│  Bun (bundler)                                         │
-│  React Router v7                                        │
-│  TanStack Query (server state)                         │
-│  Zustand (UI state)                                    │
-│  TanStack Table (already in use)                       │
-│  fetch → /api/* (relative)                             │
-└─────────────────────────────────────────────────────────┘
+              ┌────────────┴────────────┐
+              │                         │
+              ▼                         ▼
+┌──────────────────────────┐  ┌──────────────────────────┐
+│   apps/web (PRESERVED)   │  │  apps/web-next (NEW)     │
+├──────────────────────────┤  ├──────────────────────────┤
+│  Original implementation │  │  Bun (bundler)           │
+│  Reference & rollback    │  │  React Router v7         │
+│  Do not modify           │  │  TanStack Query          │
+│                          │  │  Zustand (UI state)      │
+│                          │  │  fetch → /api/*          │
+└──────────────────────────┘  └──────────────────────────┘
+                                         │
+                                         ▼
+                              ┌──────────────────────────┐
+                              │  apps/app/dist/web/      │
+                              │  (Built static assets)   │
+                              └──────────────────────────┘
 ```
 
 ---
 
 ## Table of Contents
 
-1. [Pre-Migration Setup](#1-pre-migration-setup)
-2. [Route Migration Overview](#2-route-migration-overview)
-3. [Phase 1: Authentication Routes](#phase-1-authentication-routes)
-4. [Phase 2: Workspace Routes](#phase-2-workspace-routes)
-5. [Phase 3: Project Routes](#phase-3-project-routes)
-6. [Phase 4: Issue Management Routes](#phase-4-issue-management-routes)
-7. [Phase 5: Cycles & Modules Routes](#phase-5-cycles--modules-routes)
-8. [Phase 6: Pages Routes](#phase-6-pages-routes)
-9. [Phase 7: Analytics & Views Routes](#phase-7-analytics--views-routes)
-10. [Phase 8: Settings Routes](#phase-8-settings-routes)
-11. [Phase 9: Profile Routes](#phase-9-profile-routes)
-12. [Dependency Removal Guide](#dependency-removal-guide)
-13. [State Management Migration](#state-management-migration)
-14. [API Client Migration](#api-client-migration)
-15. [Testing Checklist](#testing-checklist)
+1. [Project Structure](#project-structure)
+2. [Pre-Migration Setup](#1-pre-migration-setup)
+3. [Route Migration Overview](#2-route-migration-overview)
+4. [Phase 1: Authentication Routes](#phase-1-authentication-routes)
+5. [Phase 2: Workspace Routes](#phase-2-workspace-routes)
+6. [Phase 3: Project Routes](#phase-3-project-routes)
+7. [Phase 4: Issue Management Routes](#phase-4-issue-management-routes)
+8. [Phase 5: Cycles & Modules Routes](#phase-5-cycles--modules-routes)
+9. [Phase 6: Pages Routes](#phase-6-pages-routes)
+10. [Phase 7: Analytics & Views Routes](#phase-7-analytics--views-routes)
+11. [Phase 8: Settings Routes](#phase-8-settings-routes)
+12. [Phase 9: Profile Routes](#phase-9-profile-routes)
+13. [Dependency Removal Guide](#dependency-removal-guide)
+14. [State Management Migration](#state-management-migration)
+15. [API Client Migration](#api-client-migration)
+16. [Testing Checklist](#testing-checklist)
 
 ---
 
 ## 1. Pre-Migration Setup
 
-### 1.1 Install New Dependencies
+### 1.1 Create the `web-next` Package
 
 ```bash
-cd apps/app
-bun add @tanstack/react-query @tanstack/react-query-devtools zustand
+# Create the new frontend package
+mkdir -p apps/web-next
+cd apps/web-next
+
+# Initialize package.json
+cat > package.json << 'EOF'
+{
+  "name": "@plane/web-next",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch app/entry.tsx",
+    "build": "bun build app/entry.tsx --outdir=../app/dist/web --minify --splitting",
+    "typecheck": "tsc --noEmit"
+  }
+}
+EOF
+
+# Install dependencies
+bun add react react-dom react-router @tanstack/react-query @tanstack/react-query-devtools zustand
+bun add -d typescript @types/react @types/react-dom
 ```
 
-### 1.2 Remove Old Dependencies
+### 1.2 Create Initial Directory Structure
 
 ```bash
-cd apps/web
-bun remove @sentry/react-router mobx mobx-react mobx-react-lite mobx-utils swr vite @vitejs/plugin-react
+cd apps/web-next
+
+mkdir -p app
+mkdir -p core/components
+mkdir -p core/hooks/queries
+mkdir -p core/store/ui
+mkdir -p core/lib
 ```
 
-### 1.3 Remove Files
+### 1.3 Files to Exclude from Migration
 
-```bash
-# Remove Vite config
-rm vite.config.ts
+> **Note:** Do NOT delete or modify files in `apps/web/`. The following files/patterns should be **excluded** when copying to `apps/web-next/`:
 
-# Remove Sentry entry
-rm app/entry.client.tsx
+```
+# Vite config (not needed - Bun handles bundling)
+vite.config.ts
 
-# Remove MobX stores (will be replaced)
-rm -rf core/store/
-rm -rf ce/store/
+# Sentry entry (not needed - Sentry removed)
+app/entry.client.tsx
+
+# MobX stores (replaced by TanStack Query + Zustand)
+core/store/
+
+# Environment-specific configs
+.env*
 ```
 
-### 1.4 Update Environment Variables
+These files remain in `apps/web/` for reference and rollback purposes.
 
-Remove from `.env`:
-```diff
-- VITE_API_BASE_URL=http://localhost:8000
-- VITE_SENTRY_DSN=
-- VITE_SENTRY_ENVIRONMENT=
-- VITE_SENTRY_SEND_DEFAULT_PII=
-- VITE_SENTRY_TRACES_SAMPLE_RATE=
-- VITE_SENTRY_PROFILES_SAMPLE_RATE=
-- VITE_SENTRY_REPLAYS_SESSION_SAMPLE_RATE=
-- VITE_SENTRY_REPLAYS_ON_ERROR_SAMPLE_RATE=
-```
+### 1.4 Environment Variables
 
-### 1.5 Configure Bun for Frontend Build
+The `apps/web-next/` package does NOT need environment variables for API URLs since all API calls are relative (`/api/*`).
+
+No Sentry-related variables are needed.
+
+### 1.5 Configure Bun Server for Frontend Build
 
 Update `apps/app/package.json`:
 ```json
 {
   "scripts": {
-    "build:web": "bun build ../web/app/entry.tsx --outdir=./dist/web --minify --splitting",
+    "build:web": "cd ../web-next && bun run build",
     "dev": "bun --watch src/index.ts",
+    "dev:all": "concurrently \"bun run dev\" \"cd ../web-next && bun run dev\"",
     "start": "bun src/index.ts"
   }
 }
@@ -147,16 +230,50 @@ import { serveStatic } from 'hono/bun';
 
 const app = new Hono();
 
-// API routes
+// API routes (must come first)
 app.route('/api', apiRoutes);
 
-// Serve static frontend assets
-app.use('/*', serveStatic({ root: './dist/web' }));
+// Static assets (JS, CSS, images with hashed filenames)
+app.use('/assets/*', serveStatic({ root: './dist/web' }));
 
-// SPA fallback
+// Favicon and other root static files
+app.use('/favicon.ico', serveStatic({ path: './dist/web/favicon.ico' }));
+
+// SPA fallback - all other routes serve index.html
 app.get('*', serveStatic({ path: './dist/web/index.html' }));
 
 export default app;
+```
+
+### 1.7 Create Entry Point for `web-next`
+
+Create `apps/web-next/app/entry.tsx`:
+```typescript
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
+import { App } from './app';
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 1000 * 60 * 5,    // 5 minutes
+      gcTime: 1000 * 60 * 30,       // 30 minutes
+      retry: 1,
+      refetchOnWindowFocus: false,
+    },
+  },
+});
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <QueryClientProvider client={queryClient}>
+      <App />
+      <ReactQueryDevtools initialIsOpen={false} />
+    </QueryClientProvider>
+  </StrictMode>
+);
 ```
 
 ---
@@ -181,14 +298,14 @@ export default app;
 
 ### Routes to Migrate
 
-| Route | File Location | CE Components |
-|-------|--------------|---------------|
-| `/` (Home/Sign-in) | `app/(home)/page.tsx` | None (core only) |
-| `/sign-up` | `app/(all)/sign-up/page.tsx` | None (core only) |
-| `/accounts/forgot-password` | `app/(all)/accounts/forgot-password/page.tsx` | None |
-| `/accounts/set-password` | `app/(all)/accounts/set-password/page.tsx` | None |
-| `/accounts/reset-password` | `app/(all)/accounts/reset-password/page.tsx` | None |
-| `/onboarding` | `app/(all)/onboarding/page.tsx` | `ce/components/onboarding/` |
+| Route | File Location | Components |
+|-------|--------------|------------|
+| `/` (Home/Sign-in) | `app/(home)/page.tsx` | `core/components/account/` |
+| `/sign-up` | `app/(all)/sign-up/page.tsx` | `core/components/account/` |
+| `/accounts/forgot-password` | `app/(all)/accounts/forgot-password/page.tsx` | `core/components/account/` |
+| `/accounts/set-password` | `app/(all)/accounts/set-password/page.tsx` | `core/components/account/` |
+| `/accounts/reset-password` | `app/(all)/accounts/reset-password/page.tsx` | `core/components/account/` |
+| `/onboarding` | `app/(all)/onboarding/page.tsx` | `core/components/onboarding/` |
 
 ### Components to Migrate
 
@@ -204,7 +321,7 @@ core/components/account/
 ├── sign-up-forms/
 └── password-forms/
 
-ce/components/onboarding/
+core/components/onboarding/
 ├── create-workspace/
 ├── invite-members/
 ├── profile-setup/
@@ -214,7 +331,7 @@ ce/components/onboarding/
 ### TanStack Query Hooks to Create
 
 ```typescript
-// core/hooks/queries/use-auth.ts
+// apps/web-next/core/hooks/queries/use-auth.ts
 export const useCurrentUserQuery = () => {
   return useQuery({
     queryKey: ['currentUser'],
@@ -261,24 +378,24 @@ export const useSignUpMutation = () => {
 
 ### Routes to Migrate
 
-| Route | File Location | CE Components |
-|-------|--------------|---------------|
-| `/create-workspace` | `app/(all)/create-workspace/page.tsx` | `ce/components/workspace/` |
-| `/:workspaceSlug` | `app/(all)/[workspaceSlug]/page.tsx` | `ce/components/home/` |
-| `/invitations` | `app/(all)/invitations/page.tsx` | None |
-| `/workspace-invitations/:invitationId` | `app/(all)/workspace-invitations/page.tsx` | None |
+| Route | File Location | Components |
+|-------|--------------|------------|
+| `/create-workspace` | `app/(all)/create-workspace/page.tsx` | `core/components/workspace/` |
+| `/:workspaceSlug` | `app/(all)/[workspaceSlug]/page.tsx` | `core/components/home/` |
+| `/invitations` | `app/(all)/invitations/page.tsx` | `core/components/invitations/` |
+| `/workspace-invitations/:invitationId` | `app/(all)/workspace-invitations/page.tsx` | `core/components/invitations/` |
 
 ### Components to Migrate
 
 ```
-ce/components/workspace/
+core/components/workspace/
 ├── create/
 ├── settings/
 ├── views/
 ├── sidebar/
 └── index.ts
 
-ce/components/home/
+core/components/home/
 ├── root.tsx
 ├── widgets/
 │   ├── assigned-issues/
@@ -288,13 +405,13 @@ ce/components/home/
 │   └── quick-links/
 └── index.ts
 
-ce/components/sidebar/
+core/components/sidebar/
 ├── workspace-menu.tsx
 ├── project-list.tsx
 ├── favorites.tsx
 └── index.ts
 
-ce/components/app-rail/
+core/components/app-rail/
 ├── app-rail.tsx
 ├── app-rail-item.tsx
 └── index.ts
@@ -302,9 +419,9 @@ ce/components/app-rail/
 
 ### MobX → Zustand Store Migration
 
-**Before (MobX):**
+**Before (MobX in `apps/web/`):**
 ```typescript
-// ce/store/workspace/workspace.store.ts
+// apps/web/core/store/workspace/workspace.store.ts
 class WorkspaceStore {
   workspaces: IWorkspace[] = [];
   currentWorkspace: IWorkspace | null = null;
@@ -321,7 +438,7 @@ class WorkspaceStore {
 
 **After (Zustand - UI state only):**
 ```typescript
-// core/store/workspace-ui.store.ts
+// apps/web-next/core/store/workspace-ui.store.ts
 import { create } from 'zustand';
 
 interface WorkspaceUIState {
@@ -342,7 +459,7 @@ export const useWorkspaceUIStore = create<WorkspaceUIState>((set) => ({
 ### TanStack Query Hooks
 
 ```typescript
-// core/hooks/queries/use-workspaces.ts
+// apps/web-next/core/hooks/queries/use-workspaces.ts
 export const useWorkspacesQuery = () => {
   return useQuery({
     queryKey: ['workspaces'],
@@ -386,7 +503,7 @@ export const useCreateWorkspaceMutation = () => {
 1. [ ] Create Zustand store for workspace UI state
 2. [ ] Create workspace query hooks
 3. [ ] Remove MobX workspace stores
-4. [ ] Migrate CE workspace components to use hooks
+4. [ ] Migrate workspace components to use hooks
 5. [ ] Migrate home dashboard widgets
 6. [ ] Migrate sidebar components
 7. [ ] Migrate app rail components
@@ -400,16 +517,16 @@ export const useCreateWorkspaceMutation = () => {
 
 ### Routes to Migrate
 
-| Route | File Location | CE Components |
-|-------|--------------|---------------|
-| `/:workspaceSlug/projects` | `app/(all)/[workspaceSlug]/projects/page.tsx` | `ce/components/projects/` |
-| `/:workspaceSlug/projects/:projectId` | `app/(all)/[workspaceSlug]/projects/[projectId]/page.tsx` | `ce/components/projects/` |
-| `/:workspaceSlug/projects/:projectId/settings/*` | `app/(all)/[workspaceSlug]/projects/[projectId]/settings/` | `ce/components/projects/settings/` |
+| Route | File Location | Components |
+|-------|--------------|------------|
+| `/:workspaceSlug/projects` | `app/(all)/[workspaceSlug]/projects/page.tsx` | `core/components/projects/` |
+| `/:workspaceSlug/projects/:projectId` | `app/(all)/[workspaceSlug]/projects/[projectId]/page.tsx` | `core/components/projects/` |
+| `/:workspaceSlug/projects/:projectId/settings/*` | `app/(all)/[workspaceSlug]/projects/[projectId]/settings/` | `core/components/projects/settings/` |
 
 ### Components to Migrate
 
 ```
-ce/components/projects/
+core/components/projects/
 ├── card/
 │   ├── project-card.tsx
 │   ├── project-card-list.tsx
@@ -436,7 +553,7 @@ ce/components/projects/
 ### TanStack Query Hooks
 
 ```typescript
-// core/hooks/queries/use-projects.ts
+// apps/web-next/core/hooks/queries/use-projects.ts
 export const useProjectsQuery = (workspaceSlug: string) => {
   return useQuery({
     queryKey: ['projects', workspaceSlug],
@@ -523,7 +640,7 @@ export const useDeleteProjectMutation = (workspaceSlug: string) => {
 ### Zustand Store (UI only)
 
 ```typescript
-// core/store/project-ui.store.ts
+// apps/web-next/core/store/project-ui.store.ts
 import { create } from 'zustand';
 
 interface ProjectUIState {
@@ -566,18 +683,18 @@ export const useProjectUIStore = create<ProjectUIState>((set) => ({
 
 ### Routes to Migrate
 
-| Route | File Location | CE Components |
-|-------|--------------|---------------|
-| `/:workspaceSlug/projects/:projectId/issues` | `app/(all)/[workspaceSlug]/projects/[projectId]/issues/page.tsx` | `ce/components/issues/` |
-| `/:workspaceSlug/projects/:projectId/issues/:issueId` | `app/(all)/[workspaceSlug]/projects/[projectId]/issues/[issueId]/page.tsx` | `ce/components/issues/` |
-| `/:workspaceSlug/projects/:projectId/inbox` | `app/(all)/[workspaceSlug]/projects/[projectId]/inbox/page.tsx` | `ce/components/inbox/` |
-| `/:workspaceSlug/projects/:projectId/archives/issues` | `app/(all)/[workspaceSlug]/projects/[projectId]/archives/issues/page.tsx` | `ce/components/issues/` |
-| `/:workspaceSlug/projects/:projectId/draft-issues` | `app/(all)/[workspaceSlug]/projects/[projectId]/draft-issues/page.tsx` | `ce/components/issues/` |
+| Route | File Location | Components |
+|-------|--------------|------------|
+| `/:workspaceSlug/projects/:projectId/issues` | `app/(all)/[workspaceSlug]/projects/[projectId]/issues/page.tsx` | `core/components/issues/` |
+| `/:workspaceSlug/projects/:projectId/issues/:issueId` | `app/(all)/[workspaceSlug]/projects/[projectId]/issues/[issueId]/page.tsx` | `core/components/issues/` |
+| `/:workspaceSlug/projects/:projectId/inbox` | `app/(all)/[workspaceSlug]/projects/[projectId]/inbox/page.tsx` | `core/components/inbox/` |
+| `/:workspaceSlug/projects/:projectId/archives/issues` | `app/(all)/[workspaceSlug]/projects/[projectId]/archives/issues/page.tsx` | `core/components/issues/` |
+| `/:workspaceSlug/projects/:projectId/draft-issues` | `app/(all)/[workspaceSlug]/projects/[projectId]/draft-issues/page.tsx` | `core/components/issues/` |
 
 ### Components to Migrate
 
 ```
-ce/components/issues/
+core/components/issues/
 ├── issue-layouts/
 │   ├── list/
 │   ├── kanban/
@@ -600,7 +717,7 @@ ce/components/issues/
 ├── filters/
 └── index.ts
 
-ce/components/inbox/
+core/components/inbox/
 ├── inbox-root.tsx
 ├── inbox-list.tsx
 ├── inbox-item.tsx
@@ -611,7 +728,7 @@ ce/components/inbox/
 ### TanStack Query Hooks
 
 ```typescript
-// core/hooks/queries/use-issues.ts
+// apps/web-next/core/hooks/queries/use-issues.ts
 export const useIssuesQuery = (
   workspaceSlug: string,
   projectId: string,
@@ -737,7 +854,7 @@ export const useBulkUpdateIssuesMutation = (workspaceSlug: string, projectId: st
 ### Zustand Store (UI only)
 
 ```typescript
-// core/store/issue-ui.store.ts
+// apps/web-next/core/store/issue-ui.store.ts
 import { create } from 'zustand';
 
 type IssueLayout = 'list' | 'kanban' | 'calendar' | 'spreadsheet' | 'gantt';
@@ -824,18 +941,18 @@ export const useIssueUIStore = create<IssueUIState>((set) => ({
 
 ### Routes to Migrate
 
-| Route | File Location | CE Components |
-|-------|--------------|---------------|
-| `/:workspaceSlug/projects/:projectId/cycles` | `app/(all)/[workspaceSlug]/projects/[projectId]/cycles/page.tsx` | `ce/components/cycles/` |
-| `/:workspaceSlug/projects/:projectId/cycles/:cycleId` | `app/(all)/[workspaceSlug]/projects/[projectId]/cycles/[cycleId]/page.tsx` | `ce/components/cycles/` |
-| `/:workspaceSlug/projects/:projectId/modules` | `app/(all)/[workspaceSlug]/projects/[projectId]/modules/page.tsx` | `ce/components/modules/` |
-| `/:workspaceSlug/projects/:projectId/modules/:moduleId` | `app/(all)/[workspaceSlug]/projects/[projectId]/modules/[moduleId]/page.tsx` | `ce/components/modules/` |
-| `/:workspaceSlug/active-cycles` | `app/(all)/[workspaceSlug]/active-cycles/page.tsx` | `ce/components/active-cycles/` |
+| Route | File Location | Components |
+|-------|--------------|------------|
+| `/:workspaceSlug/projects/:projectId/cycles` | `app/(all)/[workspaceSlug]/projects/[projectId]/cycles/page.tsx` | `core/components/cycles/` |
+| `/:workspaceSlug/projects/:projectId/cycles/:cycleId` | `app/(all)/[workspaceSlug]/projects/[projectId]/cycles/[cycleId]/page.tsx` | `core/components/cycles/` |
+| `/:workspaceSlug/projects/:projectId/modules` | `app/(all)/[workspaceSlug]/projects/[projectId]/modules/page.tsx` | `core/components/modules/` |
+| `/:workspaceSlug/projects/:projectId/modules/:moduleId` | `app/(all)/[workspaceSlug]/projects/[projectId]/modules/[moduleId]/page.tsx` | `core/components/modules/` |
+| `/:workspaceSlug/active-cycles` | `app/(all)/[workspaceSlug]/active-cycles/page.tsx` | `core/components/active-cycles/` |
 
 ### Components to Migrate
 
 ```
-ce/components/cycles/
+core/components/cycles/
 ├── list/
 ├── board/
 ├── gantt/
@@ -845,7 +962,7 @@ ce/components/cycles/
 ├── transfer-issues/
 └── index.ts
 
-ce/components/modules/
+core/components/modules/
 ├── list/
 ├── board/
 ├── gantt/
@@ -854,7 +971,7 @@ ce/components/modules/
 ├── sidebar/
 └── index.ts
 
-ce/components/active-cycles/
+core/components/active-cycles/
 ├── active-cycle-root.tsx
 ├── active-cycle-stats.tsx
 ├── active-cycle-progress.tsx
@@ -864,7 +981,7 @@ ce/components/active-cycles/
 ### TanStack Query Hooks
 
 ```typescript
-// core/hooks/queries/use-cycles.ts
+// apps/web-next/core/hooks/queries/use-cycles.ts
 export const useCyclesQuery = (workspaceSlug: string, projectId: string) => {
   return useQuery({
     queryKey: ['cycles', workspaceSlug, projectId],
@@ -928,7 +1045,7 @@ export const useAddIssuesToCycleMutation = (
   });
 };
 
-// core/hooks/queries/use-modules.ts
+// apps/web-next/core/hooks/queries/use-modules.ts
 export const useModulesQuery = (workspaceSlug: string, projectId: string) => {
   return useQuery({
     queryKey: ['modules', workspaceSlug, projectId],
@@ -985,16 +1102,16 @@ export const useCreateModuleMutation = (workspaceSlug: string, projectId: string
 
 ### Routes to Migrate
 
-| Route | File Location | CE Components |
-|-------|--------------|---------------|
-| `/:workspaceSlug/projects/:projectId/pages` | `app/(all)/[workspaceSlug]/projects/[projectId]/pages/page.tsx` | `ce/components/pages/` |
-| `/:workspaceSlug/projects/:projectId/pages/:pageId` | `app/(all)/[workspaceSlug]/projects/[projectId]/pages/[pageId]/page.tsx` | `ce/components/pages/` |
-| `/:workspaceSlug/projects/:projectId/archives/pages` | `app/(all)/[workspaceSlug]/projects/[projectId]/archives/pages/page.tsx` | `ce/components/pages/` |
+| Route | File Location | Components |
+|-------|--------------|------------|
+| `/:workspaceSlug/projects/:projectId/pages` | `app/(all)/[workspaceSlug]/projects/[projectId]/pages/page.tsx` | `core/components/pages/` |
+| `/:workspaceSlug/projects/:projectId/pages/:pageId` | `app/(all)/[workspaceSlug]/projects/[projectId]/pages/[pageId]/page.tsx` | `core/components/pages/` |
+| `/:workspaceSlug/projects/:projectId/archives/pages` | `app/(all)/[workspaceSlug]/projects/[projectId]/archives/pages/page.tsx` | `core/components/pages/` |
 
 ### Components to Migrate
 
 ```
-ce/components/pages/
+core/components/pages/
 ├── list/
 ├── editor/
 ├── modal/
@@ -1006,7 +1123,7 @@ ce/components/pages/
 ### TanStack Query Hooks
 
 ```typescript
-// core/hooks/queries/use-pages.ts
+// apps/web-next/core/hooks/queries/use-pages.ts
 export const usePagesQuery = (workspaceSlug: string, projectId: string) => {
   return useQuery({
     queryKey: ['pages', workspaceSlug, projectId],
@@ -1078,27 +1195,24 @@ export const useUpdatePageMutation = (
 
 ### Routes to Migrate
 
-| Route | File Location | CE Components |
-|-------|--------------|---------------|
-| `/:workspaceSlug/analytics` | `app/(all)/[workspaceSlug]/analytics/page.tsx` | `ce/components/analytics/` |
-| `/:workspaceSlug/analytics/:tabId` | `app/(all)/[workspaceSlug]/analytics/[tabId]/page.tsx` | `ce/components/analytics/` |
-| `/:workspaceSlug/projects/:projectId/views` | `app/(all)/[workspaceSlug]/projects/[projectId]/views/page.tsx` | `ce/components/views/` |
-| `/:workspaceSlug/projects/:projectId/views/:viewId` | `app/(all)/[workspaceSlug]/projects/[projectId]/views/[viewId]/page.tsx` | `ce/components/views/` |
+| Route | File Location | Components |
+|-------|--------------|------------|
+| `/:workspaceSlug/analytics` | `app/(all)/[workspaceSlug]/analytics/page.tsx` | `core/components/analytics/` |
+| `/:workspaceSlug/analytics/:tabId` | `app/(all)/[workspaceSlug]/analytics/[tabId]/page.tsx` | `core/components/analytics/` |
+| `/:workspaceSlug/projects/:projectId/views` | `app/(all)/[workspaceSlug]/projects/[projectId]/views/page.tsx` | `core/components/views/` |
+| `/:workspaceSlug/projects/:projectId/views/:viewId` | `app/(all)/[workspaceSlug]/projects/[projectId]/views/[viewId]/page.tsx` | `core/components/views/` |
 
 ### Components to Migrate
 
 ```
-ce/components/analytics/
+core/components/analytics/
 ├── project-analytics/
 ├── custom-analytics/
-└── index.ts
-
-core/components/analytics/
 ├── insight-table/     # Already uses TanStack Table
 ├── work-items/
 └── index.ts
 
-ce/components/views/
+core/components/views/
 ├── view-list.tsx
 ├── view-list-item.tsx
 ├── view-modal.tsx
@@ -1109,7 +1223,7 @@ ce/components/views/
 ### TanStack Query Hooks
 
 ```typescript
-// core/hooks/queries/use-analytics.ts
+// apps/web-next/core/hooks/queries/use-analytics.ts
 export const useWorkspaceAnalyticsQuery = (workspaceSlug: string, params?: AnalyticsParams) => {
   return useQuery({
     queryKey: ['analytics', workspaceSlug, params],
@@ -1122,7 +1236,7 @@ export const useWorkspaceAnalyticsQuery = (workspaceSlug: string, params?: Analy
   });
 };
 
-// core/hooks/queries/use-views.ts
+// apps/web-next/core/hooks/queries/use-views.ts
 export const useViewsQuery = (workspaceSlug: string, projectId: string) => {
   return useQuery({
     queryKey: ['views', workspaceSlug, projectId],
@@ -1164,21 +1278,21 @@ export const useCreateViewMutation = (workspaceSlug: string, projectId: string) 
 
 ### Routes to Migrate
 
-| Route | File Location | CE Components |
-|-------|--------------|---------------|
-| `/:workspaceSlug/settings` | `app/(all)/[workspaceSlug]/settings/page.tsx` | `ce/components/workspace/settings/` |
-| `/:workspaceSlug/settings/members` | `app/(all)/[workspaceSlug]/settings/members/page.tsx` | - |
-| `/:workspaceSlug/settings/billing` | `app/(all)/[workspaceSlug]/settings/billing/page.tsx` | - |
-| `/:workspaceSlug/settings/integrations` | `app/(all)/[workspaceSlug]/settings/integrations/page.tsx` | - |
-| `/:workspaceSlug/settings/imports` | `app/(all)/[workspaceSlug]/settings/imports/page.tsx` | - |
-| `/:workspaceSlug/settings/exports` | `app/(all)/[workspaceSlug]/settings/exports/page.tsx` | - |
-| `/:workspaceSlug/settings/webhooks` | `app/(all)/[workspaceSlug]/settings/webhooks/page.tsx` | - |
-| `/:workspaceSlug/settings/api-tokens` | `app/(all)/[workspaceSlug]/settings/api-tokens/page.tsx` | - |
+| Route | File Location | Components |
+|-------|--------------|------------|
+| `/:workspaceSlug/settings` | `app/(all)/[workspaceSlug]/settings/page.tsx` | `core/components/settings/` |
+| `/:workspaceSlug/settings/members` | `app/(all)/[workspaceSlug]/settings/members/page.tsx` | `core/components/settings/` |
+| `/:workspaceSlug/settings/billing` | `app/(all)/[workspaceSlug]/settings/billing/page.tsx` | `core/components/settings/` |
+| `/:workspaceSlug/settings/integrations` | `app/(all)/[workspaceSlug]/settings/integrations/page.tsx` | `core/components/settings/` |
+| `/:workspaceSlug/settings/imports` | `app/(all)/[workspaceSlug]/settings/imports/page.tsx` | `core/components/settings/` |
+| `/:workspaceSlug/settings/exports` | `app/(all)/[workspaceSlug]/settings/exports/page.tsx` | `core/components/settings/` |
+| `/:workspaceSlug/settings/webhooks` | `app/(all)/[workspaceSlug]/settings/webhooks/page.tsx` | `core/components/settings/` |
+| `/:workspaceSlug/settings/api-tokens` | `app/(all)/[workspaceSlug]/settings/api-tokens/page.tsx` | `core/components/settings/` |
 
 ### TanStack Query Hooks
 
 ```typescript
-// core/hooks/queries/use-settings.ts
+// apps/web-next/core/hooks/queries/use-settings.ts
 export const useWebhooksQuery = (workspaceSlug: string) => {
   return useQuery({
     queryKey: ['webhooks', workspaceSlug],
@@ -1225,17 +1339,17 @@ export const useIntegrationsQuery = (workspaceSlug: string) => {
 
 ### Routes to Migrate
 
-| Route | File Location | CE Components |
-|-------|--------------|---------------|
-| `/profile` | `app/(all)/profile/page.tsx` | `ce/components/profile/` |
-| `/profile/settings` | `app/(all)/profile/settings/page.tsx` | - |
-| `/profile/activity` | `app/(all)/profile/activity/page.tsx` | - |
-| `/profile/preferences` | `app/(all)/profile/preferences/page.tsx` | `ce/components/preferences/` |
+| Route | File Location | Components |
+|-------|--------------|------------|
+| `/profile` | `app/(all)/profile/page.tsx` | `core/components/profile/` |
+| `/profile/settings` | `app/(all)/profile/settings/page.tsx` | `core/components/profile/` |
+| `/profile/activity` | `app/(all)/profile/activity/page.tsx` | `core/components/profile/` |
+| `/profile/preferences` | `app/(all)/profile/preferences/page.tsx` | `core/components/profile/` |
 
 ### TanStack Query Hooks
 
 ```typescript
-// core/hooks/queries/use-profile.ts
+// apps/web-next/core/hooks/queries/use-profile.ts
 export const useProfileQuery = () => {
   return useQuery({
     queryKey: ['profile'],
@@ -1315,38 +1429,35 @@ export const useUpdatePreferencesMutation = () => {
 }
 ```
 
-### Files to Delete
+### Files to Exclude (Do NOT Copy to `web-next/`)
 
-```bash
-# Vite
-rm vite.config.ts
+> **Reminder:** Per the preservation policy, do NOT delete files from `apps/web/`. The following files should simply not be copied to `apps/web-next/`:
 
-# Sentry
-rm app/entry.client.tsx
+```
+# Vite (not needed in Bun stack)
+vite.config.ts
 
-# MobX stores (all will be replaced)
-rm -rf core/store/
-rm -rf ce/store/
+# Sentry (removed from new stack)
+app/entry.client.tsx
+
+# MobX stores (replaced by TanStack Query + Zustand)
+core/store/
 
 # SWR related (if any dedicated files)
-# Keep service files - they contain API logic
+# DO copy service files - they contain reusable API logic
 ```
 
-### Files to Modify
+These files remain in `apps/web/` as reference implementations.
 
-#### `app/root.tsx`
-```diff
-- import * as Sentry from "@sentry/react-router";
+### New Files in `apps/web-next/`
 
-// In error boundary
-- Sentry.captureException(error);
-+ console.error("Application error:", error);
-```
-
-#### `app/provider.tsx`
+#### `app/entry.tsx` (new entry point)
 ```typescript
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
+import { App } from './app';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -1359,12 +1470,42 @@ const queryClient = new QueryClient({
   },
 });
 
-export function AppProvider({ children }: { children: React.ReactNode }) {
-  return (
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
     <QueryClientProvider client={queryClient}>
-      {children}
+      <App />
       <ReactQueryDevtools initialIsOpen={false} />
     </QueryClientProvider>
+  </StrictMode>
+);
+```
+
+#### `app/root.tsx` (migrated, no Sentry)
+```typescript
+// No Sentry imports - just standard error handling
+import { Outlet } from 'react-router';
+
+export default function Root() {
+  return (
+    <html lang="en">
+      <head>
+        <meta charSet="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+      </head>
+      <body>
+        <Outlet />
+      </body>
+    </html>
+  );
+}
+
+export function ErrorBoundary({ error }: { error: Error }) {
+  console.error("Application error:", error);
+  return (
+    <div>
+      <h1>Something went wrong</h1>
+      <pre>{error.message}</pre>
+    </div>
   );
 }
 ```
@@ -1389,7 +1530,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 ### Zustand Store Structure
 
 ```
-core/store/
+apps/web-next/core/store/
 ├── ui/
 │   ├── app-ui.store.ts      # Global UI (theme, sidebar)
 │   ├── issue-ui.store.ts    # Issue-specific UI
@@ -1400,7 +1541,7 @@ core/store/
 ### Example: Global UI Store
 
 ```typescript
-// core/store/ui/app-ui.store.ts
+// apps/web-next/core/store/ui/app-ui.store.ts
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
@@ -1439,10 +1580,10 @@ export const useAppUIStore = create<AppUIState>()(
 
 ## API Client Migration
 
-### Before (axios with absolute URL)
+### Before (axios with absolute URL in `apps/web/`)
 
 ```typescript
-// core/services/project.service.ts
+// apps/web/core/services/project.service.ts
 import axios from 'axios';
 
 const API_BASE_URL = process.env.VITE_API_BASE_URL;
@@ -1455,10 +1596,10 @@ export class ProjectService {
 }
 ```
 
-### After (fetch with relative URL)
+### After (fetch with relative URL in `apps/web-next/`)
 
 ```typescript
-// core/lib/api.ts
+// apps/web-next/core/lib/api.ts
 class APIError extends Error {
   constructor(public status: number, message: string) {
     super(message);
@@ -1492,7 +1633,7 @@ export const apiClient = {
 ### Usage in Query Hooks
 
 ```typescript
-// core/hooks/queries/use-projects.ts
+// apps/web-next/core/hooks/queries/use-projects.ts
 import { apiClient } from '@/lib/api';
 
 export const useProjectsQuery = (workspaceSlug: string) => {
@@ -1562,22 +1703,20 @@ For each phase:
 
 ### Config Updates for Migration
 
-The Playwright config (`playwright.config.ts`) already supports the Bun server:
+The Playwright config (`playwright.config.ts`) should be updated to build from `web-next`:
 
 ```typescript
 webServer: [
   {
-    // Bun API server
-    command: `DATABASE_URL=file:${path.resolve(__dirname, ".test-data/test.db")} PORT=${API_PORT} bun src/index.ts`,
+    // Single Bun server serves both API and frontend
+    command: `cd ../web-next && bun run build && cd ../app && DATABASE_URL=file:${path.resolve(__dirname, ".test-data/test.db")} PORT=${API_PORT} bun src/index.ts`,
     url: `http://localhost:${API_PORT}/api/health/`,
-  },
-  {
-    // Frontend (update this when migrating to Bun-served frontend)
-    command: `bun run build:web && bun src/index.ts`, // Single server serves both
-    url: `http://localhost:${WEB_PORT}`,
+    reuseExistingServer: !process.env.CI,
   },
 ],
 ```
+
+Note: The Bun server serves both the API (`/api/*`) and the built frontend (from `dist/web/`) on the same port.
 
 ### Key Test Files Reference
 
@@ -1678,7 +1817,17 @@ webServer: [
 
 ## Summary
 
-### What's Being Removed
+### Architecture Overview
+
+```
+apps/
+├── web/          # PRESERVED (original, do not modify)
+├── web-next/     # NEW (migrated frontend)
+└── app/          # Bun server (serves API + static files)
+    └── dist/web/ # Built frontend from web-next
+```
+
+### What's Being Removed (from `web-next/`)
 - **Sentry** - Error tracking (can add alternative later)
 - **Vite** - Bun handles bundling
 - **MobX** - Replaced by TanStack Query + Zustand
@@ -1686,11 +1835,16 @@ webServer: [
 - **axios** - Native fetch is sufficient
 - **Absolute API URLs** - Now relative (same origin)
 
-### What's Being Added
+### What's Being Added (in `web-next/`)
 - **TanStack Query** - Server state management
 - **Zustand** - Minimal UI state management
 - **Bun bundler** - Frontend build
 - **Relative API calls** - `/api/*`
+
+### What's Preserved (in `web/`)
+- **Everything** - Original implementation remains untouched
+- Use as reference during migration
+- Enables safe rollback if needed
 
 ### Benefits
 1. **Simpler stack** - Fewer dependencies
@@ -1699,3 +1853,5 @@ webServer: [
 4. **Single server** - Bun serves both API and frontend
 5. **Smaller bundle** - No MobX decorators/observers
 6. **Type safety** - Better TypeScript integration
+7. **Safe migration** - Original code preserved for reference/rollback
+8. **Parallel development** - Can run both versions during transition
